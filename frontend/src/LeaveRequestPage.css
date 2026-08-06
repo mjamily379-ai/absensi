@@ -1,0 +1,73 @@
+.leave-request-wrapper {
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.rounded-16 {
+  border-radius: 16px !important;
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.5s ease-out forwards;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(15px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.form-select, .form-control {
+  border-color: #e2e8f0;
+  transition: all 0.2s ease;
+}
+
+.form-select:focus, .form-control:focus {
+  border-color: #10b981;
+  box-shadow: 0 0 0 0.25rem rgba(16, 185, 129, 0.1);
+}
+
+.bg-emerald-light {
+  background-color: #ecfdf5 !important;
+}
+
+.tiny {
+  font-size: 0.7rem;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.spin-animation {
+  animation: spin 1s linear infinite;
+}
+
+.leave-request-wrapper .table th {
+  font-size: 0.72rem;
+  letter-spacing: 0.5px;
+  border-bottom: 2px solid #e2e8f0;
+}
+
+.leave-request-wrapper .table td {
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.leave-request-wrapper .table tbody tr:hover {
+  background-color: #f8fffe;
+}
+
+@media (max-width: 991px) {
+  .leave-request-wrapper {
+    padding-bottom: 80px; /* Space for bottom nav */
+  }
+}
+
+@media (max-width: 576px) {
+  .card-header {
+    padding: 1rem !important;
+  }
+  .card-body {
+    padding: 1.25rem !important;
+  }
+}

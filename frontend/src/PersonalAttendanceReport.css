@@ -1,0 +1,76 @@
+.search-wrapper {
+  display: flex;
+  align-items: center;
+  background: #f1f5f9;
+  padding: 0 16px;
+  border-radius: var(--radius-md);
+}
+
+.search-input {
+  background: transparent !important;
+  font-size: 0.9rem;
+  padding: 10px 0;
+}
+
+.search-icon {
+  color: var(--text-muted);
+  margin-right: 12px;
+}
+
+.filter-select {
+  font-size: 0.85rem;
+  font-weight: 500;
+  border-radius: var(--radius-md);
+  padding: 10px;
+}
+
+.custom-table thead th {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 700;
+  color: var(--text-muted);
+  border: none;
+  padding: 15px 20px;
+}
+
+.custom-table tbody td {
+  padding: 15px 20px;
+  vertical-align: middle;
+  border-bottom: 1px solid #f1f5f9;
+  font-size: 0.9rem;
+}
+
+/* Mobile Date Box */
+.date-box {
+  background: #f1f5f9;
+  padding: 5px 10px;
+  border-radius: var(--radius-md);
+  min-width: 50px;
+}
+
+.date-box .day {
+  font-weight: 800;
+  font-size: 1.2rem;
+  line-height: 1;
+  color: var(--primary-green);
+}
+
+.date-box .month {
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.badge.bg-purple {
+  background-color: #f3e8ff !important;
+  color: #7e22ce !important;
+}
+
+.history-mobile-card {
+  transition: transform 0.2s ease;
+}
+
+.history-mobile-card:active {
+  transform: scale(0.98);
+}
