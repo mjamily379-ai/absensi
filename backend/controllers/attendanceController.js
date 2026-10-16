@@ -5,14 +5,82 @@ const WorkDay = require('../models/workDayModel');
 const { processWorkTimeRecords } = require('../services/reportService');
 const Staff = require('../models/staffModel');
 const Holiday = require('../models/holidayModel');
+const LeaveRequest = require('../models/leaveRequestModel');
 const RamadanPeriod = require('../models/ramadanModel');
+const { logAction } = require('../services/auditService');
+const { getPagination, buildPaginatedResponse, isPaginatedRequest } = require('../utils/pagination');
+const { savePhoto, deleteStoredPhoto, getPhotoPath } = require('../services/photoStorage');
+const { sendNotificationToRole, isNotificationEnabled, getNotificationSettings } = require('../services/notificationService');
+const scoring = require('../config/scoring');
 
+const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(String(id || ''));
+
+// Office geo-fence configuration (server-side enforced)
+const OFFICE_LOCATION = {
+    latitude: parseFloat(process.env.OFFICE_LAT) || -6.958115592601739,
+    longitude: parseFloat(process.env.OFFICE_LNG) || 107.70755749004297,
+};
+const GEOFENCE_RADIUS = parseInt(process.env.GEOFENCE_RADIUS, 10) || 50;
+
+const getDistanceFromOfficeMeters = (latitude, longitude) => {
+    if (typeof latitude !== 'number' || typeof longitude !== 'number') {
+        return null;
+    }
+    const R = 6371000; // Earth radius in meters
+    const toRad = (deg) => (deg * Math.PI) / 180;
+    const lat1 = toRad(latitude);
+    const lat2 = toRad(OFFICE_LOCATION.latitude);
+    const dLat = toRad(OFFICE_LOCATION.latitude - latitude);
+    const dLon = toRad(OFFICE_LOCATION.longitude - longitude);
+
+    const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+};
+
+const getLocalDayRange = (dateString) => {
+    const start = new Date(`${dateString}T00:00:00`);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+    return { start, end };
+};
+
+const deleteClockRecordsForDate = async (staffId, dateString) => {
+    if (!staffId || !dateString) return 0;
+    const { start, end } = getLocalDayRange(dateString);
+    const records = await Record.find({
+        staffId,
+        timestamp: { $gte: start, $lt: end }
+    }).select('photo').lean();
+    records.forEach(r => deleteStoredPhoto(r.photo));
+    const result = await Record.deleteMany({
+        staffId,
+        timestamp: { $gte: start, $lt: end }
+    });
+    return result.deletedCount || 0;
+};
 
 exports.getAllAttendance = async (req, res) => {
     try {
-        const attendance = await Attendance.find();
-        res.json(attendance);
+        const { page, limit, skip } = getPagination(req);
+        const wantPaginated = isPaginatedRequest(req);
+
+        let query = {};
+        if (req.query.date) query.date = req.query.date;
+
+        const findQuery = () => Attendance.find(query).sort({ date: -1 });
+        if (wantPaginated) {
+            const [items, total] = await Promise.all([
+                findQuery().skip(skip).limit(limit),
+                Attendance.countDocuments(query)
+            ]);
+            return res.json(buildPaginatedResponse(items, total, page, limit));
+        }
+        res.json(await findQuery());
     } catch (err) {
+        console.error('Error fetching attendance:', err);
         res.status(500).json({ message: 'Error fetching attendance' });
     }
 };
@@ -21,6 +89,11 @@ exports.getRecordsByStaffId = async (req, res) => {
     try {
         const { id } = req.params;
         const { startDate, endDate } = req.query;
+
+        // IDOR guard: non-admins may only view their own attendance records.
+        if (req.user.role !== 'admin' && String(req.user.staffId || '') !== String(id)) {
+            return res.status(403).json({ message: 'Akses terlarang. Anda hanya dapat melihat data sendiri.' });
+        }
 
         // Create date filter if provided
         let recordFilter = { staffId: id };
@@ -35,9 +108,12 @@ exports.getRecordsByStaffId = async (req, res) => {
             User.findOne({ staffId: id })
         ]);
 
-        if (!staff || !user) {
-            return res.status(404).json({ message: 'Staf atau user tidak ditemukan.' });
+        if (!staff) {
+            return res.status(404).json({ message: 'Staf tidak ditemukan.' });
         }
+
+        // Fallback if user model doesn't exist for this staff
+        const effectiveUser = user || { role: 'staff', name: staff.name };
 
         // Now fetch related data efficiently
         const currentYear = new Date().getFullYear();
@@ -45,14 +121,14 @@ exports.getRecordsByStaffId = async (req, res) => {
             Record.find(recordFilter).sort({ timestamp: 1 }),
             Holiday.find({ 
                 date: { $regex: `^${currentYear}` },
-                role: { $in: ['all', user.role] }
-            }), // Only current year holidays and relevant roles
-            WorkDay.find({ role: user.role }), // Only settings for this user's role
+                role: { $in: ['all', effectiveUser.role] }
+            }),
+            WorkDay.find({ role: effectiveUser.role }),
             RamadanPeriod.find()
         ]);
         
         const holidaySet = new Set(holidays.map(h => h.date));
-        const processed = processWorkTimeRecords(id, records, staff, user, holidaySet, workDaySettings, ramadanPeriods);
+        const processed = processWorkTimeRecords(id, records, staff, effectiveUser, holidaySet, workDaySettings, ramadanPeriods);
         res.json(processed);
 
     } catch (err) {
@@ -80,10 +156,19 @@ exports.getTodayRecords = async (req, res) => {
         const tomorrow = new Date(today);
         tomorrow.setDate(tomorrow.getDate() + 1);
 
-        const records = await Record.find({
+        const recordsQuery = Record.find({
             timestamp: { $gte: today, $lt: tomorrow }
         }).populate('staffId', 'name').populate('edited_by', 'name'); // Populate staff and admin names
-        res.json(records);
+
+        const { page, limit, skip } = getPagination(req);
+        if (isPaginatedRequest(req)) {
+            const [items, total] = await Promise.all([
+                recordsQuery.sort({ timestamp: -1 }).skip(skip).limit(limit),
+                Record.countDocuments({ timestamp: { $gte: today, $lt: tomorrow } })
+            ]);
+            return res.json(buildPaginatedResponse(items, total, page, limit));
+        }
+        res.json(await recordsQuery.sort({ timestamp: -1 }));
     } catch (err) {
         res.status(500).json({ message: "Error fetching today's records" });
     }
@@ -101,10 +186,18 @@ exports.getRecordsByDate = async (req, res) => {
         const nextDay = new Date(selectedDate);
         nextDay.setDate(nextDay.getDate() + 1);
 
-        const records = await Record.find({
-            timestamp: { $gte: selectedDate, $lt: nextDay }
-        }).populate('staffId', 'name').populate('edited_by', 'name');
-        res.json(records);
+        const timeFilter = { timestamp: { $gte: selectedDate, $lt: nextDay } };
+        const recordsQuery = Record.find(timeFilter).populate('staffId', 'name').populate('edited_by', 'name');
+
+        const { page, limit, skip } = getPagination(req);
+        if (isPaginatedRequest(req)) {
+            const [items, total] = await Promise.all([
+                recordsQuery.sort({ timestamp: -1 }).skip(skip).limit(limit),
+                Record.countDocuments(timeFilter)
+            ]);
+            return res.json(buildPaginatedResponse(items, total, page, limit));
+        }
+        res.json(await recordsQuery.sort({ timestamp: -1 }));
     } catch (err) {
         res.status(500).json({ message: "Error fetching records for the selected date" });
     }
@@ -113,17 +206,26 @@ exports.getRecordsByDate = async (req, res) => {
 
 exports.getAllRecords = async (req, res) => {
     try {
-        const records = await Record.find().populate('staffId', 'name').populate('edited_by', 'name');
-        res.json(records);
+        const { page, limit, skip } = getPagination(req);
+        const populated = () => Record.find().populate('staffId', 'name').populate('edited_by', 'name').sort({ timestamp: -1 });
+
+        if (isPaginatedRequest(req)) {
+            const [items, total] = await Promise.all([
+                populated().skip(skip).limit(limit),
+                Record.countDocuments()
+            ]);
+            return res.json(buildPaginatedResponse(items, total, page, limit));
+        }
+        res.json(await populated());
     } catch (err) {
         res.status(500).json({ message: 'Error fetching all records' });
     }
 };
 
 exports.addManualAttendance = async (req, res) => {
-    const { staffId, name, date, clockInTime, clockOutTime, notes, adminId } = req.body;
+    const { staffId, name, date, clockInTime, clockOutTime, notes } = req.body;
 
-    if (!staffId || !name || !date || !notes || !adminId) {
+    if (!staffId || !name || !date || !notes || !req.user || !req.user.id) {
         return res.status(400).json({ message: 'Missing required fields for manual entry.' });
     }
 
@@ -132,6 +234,7 @@ exports.addManualAttendance = async (req, res) => {
     }
 
     try {
+        const adminId = req.user.id;
         if (clockInTime) {
             const clockInTimestamp = new Date(`${date}T${clockInTime}`);
             const clockInRecord = new Record({
@@ -172,6 +275,15 @@ exports.addManualAttendance = async (req, res) => {
             );
         }
 
+        await logAction({
+            action: 'ADD_MANUAL_ATTENDANCE',
+            targetType: 'Record',
+            targetName: name,
+            description: `Admin menambahkan absensi manual untuk ${name} pada ${date} (masuk: ${clockInTime || '-'}, pulang: ${clockOutTime || '-'})`,
+            details: { staffId, date, clockInTime, clockOutTime, notes },
+            req
+        });
+
         res.status(201).json({ message: 'Manual attendance created successfully.' });
     } catch (err) {
         console.error('Manual record creation error:', err);
@@ -198,6 +310,17 @@ exports.correctRecord = async (req, res) => {
         if (!updatedRecord) {
             return res.status(404).json({ message: 'Record not found.' });
         }
+
+        await logAction({
+            adminId,
+            action: 'CORRECT_RECORD',
+            targetType: 'Record',
+            targetId: id,
+            targetName: updatedRecord.staffId ? (typeof updatedRecord.staffId === 'object' ? updatedRecord.staffId.name : updatedRecord.staffId) : undefined,
+            description: `Mengoreksi record absensi staf ${(updatedRecord.staffId && typeof updatedRecord.staffId === 'object' ? updatedRecord.staffId.name : '')} menjadi ${timestamp}`,
+            details: { timestamp, notes },
+            req
+        });
 
         res.json(updatedRecord);
     } catch (err) {
@@ -226,6 +349,16 @@ exports.addClockOut = async (req, res) => {
         });
         await clockOutRecord.save();
 
+        await logAction({
+            adminId,
+            action: 'ADD_MANUAL_CLOCKOUT',
+            targetType: 'Record',
+            targetId: clockOutRecord._id,
+            description: `Menambahkan absen pulang manual pada ${date} pukul ${clockOutTime}`,
+            details: { staffId, date, clockOutTime, notes },
+            req
+        });
+
         res.status(201).json({ message: 'Clock-out record added successfully.', clockOutRecord });
     } catch (err) {
         console.error('Add clock-out error:', err);
@@ -235,12 +368,18 @@ exports.addClockOut = async (req, res) => {
 
 exports.getRanking = async (req, res) => {
     try {
+        // Scoring weights come from config/scoring.js (env-overridable, see Phase 5.6).
+        const { base, perRecord, latePenalty, onTimeBonus, minScore } = scoring.ranking;
+
         const now = new Date();
-        const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-        
+        const monthParam = req.query.month ? parseInt(req.query.month, 10) : now.getMonth() + 1;
+        const yearParam = req.query.year ? parseInt(req.query.year, 10) : now.getFullYear();
+        const firstDayOfMonth = new Date(yearParam, monthParam - 1, 1);
+        const lastDayOfMonth = new Date(yearParam, monthParam, 0, 23, 59, 59, 999);
+
         const users = await User.find({ role: { $ne: 'admin' } }).populate('staffId');
         const records = await Record.find({
-            timestamp: { $gte: firstDayOfMonth },
+            timestamp: { $gte: firstDayOfMonth, $lte: lastDayOfMonth },
             type: 'clock-in'
         });
 
@@ -252,29 +391,30 @@ exports.getRanking = async (req, res) => {
         });
 
         const workDaySettings = await WorkDay.find();
+        const dayNames = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
 
         const rankings = users.map(user => {
             if (!user.staffId) return null;
-            
+
             const staffId = user.staffId._id.toString();
             const userRecords = recordsByStaff[staffId] || [];
-            
-            // Score starts at 100 for base participation if they have any records
-            let score = userRecords.length > 0 ? 50 : 0;
-            score += userRecords.length * 10;
-            
+
+            // Score starts at base for participation if they have any records
+            let score = userRecords.length > 0 ? base : 0;
+            score += userRecords.length * perRecord;
+
             const roleSettings = workDaySettings.filter(s => s.role === user.role);
             userRecords.forEach(record => {
-                const dayName = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'][record.timestamp.getDay()];
+                const dayName = dayNames[record.timestamp.getDay()];
                 const setting = roleSettings.find(s => s.day === dayName);
                 if (setting && setting.isWorkDay) {
                     const [startH, startM] = setting.startTime.split(':').map(Number);
                     const recordH = record.timestamp.getHours();
                     const recordM = record.timestamp.getMinutes();
                     if (recordH > startH || (recordH === startH && recordM > startM)) {
-                        score -= 5;
+                        score -= latePenalty;
                     } else {
-                        score += 2; // Bonus for early/on-time
+                        score += onTimeBonus; // Bonus for early/on-time
                     }
                 }
             });
@@ -282,8 +422,9 @@ exports.getRanking = async (req, res) => {
             return {
                 staffId,
                 name: user.name,
-                score: Math.max(0, score),
-                count: userRecords.length
+                score: Math.max(minScore, score),
+                count: userRecords.length,
+                period: { month: monthParam, year: yearParam }
             };
         });
 
@@ -291,10 +432,190 @@ exports.getRanking = async (req, res) => {
             .filter(r => r !== null)
             .sort((a, b) => b.score - a.score || b.count - a.count);
 
+        const { page, limit, skip } = getPagination(req);
+        if (isPaginatedRequest(req)) {
+            return res.json(buildPaginatedResponse(
+                sortedRankings.slice(skip, skip + limit),
+                sortedRankings.length,
+                page,
+                limit
+            ));
+        }
         res.json(sortedRankings);
     } catch (err) {
         console.error('Error calculating ranking:', err);
         res.status(500).json({ message: 'Error calculating ranking' });
+    }
+};
+
+exports.getAttendanceMatrix = async (req, res) => {
+    // Returns already-computed daily status per staff for a month/year,
+    // so the admin dashboard (and charts) no longer run an O(staff x days) loop client-side.
+    try {
+        const { year, month, role } = req.query;
+        const targetYear = year ? parseInt(year, 10) : new Date().getFullYear();
+        const hasMonth = month !== undefined && month !== null && month !== '';
+        const targetMonth = hasMonth ? parseInt(month, 10) : null;
+
+        const startStr = targetMonth
+            ? `${targetYear}-${String(targetMonth).padStart(2, '0')}-01`
+            : `${targetYear}-01-01`;
+        const endDateInclusive = targetMonth
+            ? `${targetYear}-${String(targetMonth).padStart(2, '0')}-${new Date(targetYear, targetMonth, 0).getDate()}`
+            : `${targetYear}-12-31`;
+        const endDateExclusive = new Date(`${endDateInclusive}T23:59:59.999Z`);
+        endDateExclusive.setDate(endDateExclusive.getDate() + 1);
+
+        const userQuery = { role: { $ne: 'admin' } };
+        if (role && role !== 'all') userQuery.role = role;
+
+        const [users, holidays, workDays, approvedLeaves, attendance, records] = await Promise.all([
+            User.find(userQuery).select('-password').populate('staffId'),
+            Holiday.find({ date: { $regex: `^${targetYear}` } }).lean(),
+            WorkDay.find().lean(),
+            LeaveRequest.find({
+                status: 'approved',
+                startDate: { $lte: endDateInclusive },
+                endDate: { $gte: startStr }
+            }).select('staffId leaveType startDate endDate').lean(),
+            Attendance.find({ date: { $gte: startStr, $lte: endDateInclusive } }).lean(),
+            Record.find({
+                timestamp: { $gte: new Date(startStr + 'T00:00:00'), $lt: endDateExclusive }
+            }).select('staffId timestamp type photo').lean()
+        ]);
+
+        // Build lookup structures once
+        const attendanceMap = new Map(); // `${staffId}_${date}` -> AttendanceDoc
+        attendance.forEach(a => attendanceMap.set(`${a.staffId.toString()}_${a.date}`, a));
+
+        const recordSet = new Set();
+        records.forEach(r => {
+            const d = new Date(r.timestamp);
+            const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            recordSet.add(`${r.staffId.toString()}_${dateStr}`);
+        });
+
+        const leaveMap = new Map(); // `${staffId}_${date}` -> leaveType
+        approvedLeaves.forEach(lr => {
+            const staffKey = (lr.staffId && lr.staffId.toString()) || '';
+            let cur = new Date(lr.startDate);
+            const end = new Date(lr.endDate);
+            while (cur <= end) {
+                leaveMap.set(`${staffKey}_${cur.toLocaleDateString('en-CA')}`, lr.leaveType);
+                cur.setDate(cur.getDate() + 1);
+            }
+        });
+
+        // role -> date -> isHoliday ; plus a global holiday set
+        const holidayByRole = new Map();
+        const allRoleHolidays = new Set();
+        holidays.forEach(h => {
+            if (h.role === 'all') allRoleHolidays.add(h.date);
+            else {
+                if (!holidayByRole.has(h.role)) holidayByRole.set(h.role, new Set());
+                holidayByRole.get(h.role).add(h.date);
+            }
+        });
+
+        const workDayMap = new Map(); // role -> dayName -> isWorkDay
+        workDays.forEach(wd => {
+            if (!workDayMap.has(wd.role)) workDayMap.set(wd.role, new Map());
+            workDayMap.get(wd.role).set(wd.day, wd.isWorkDay);
+        });
+
+        const dayNames = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+        const statusChar = { Hadir: 'H', Sakit: 'S', Izin: 'I', Alpha: 'A', Cuti: 'C' };
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        const rows = [];
+        for (const user of users) {
+            const staffId = (user.staffId && (user.staffId._id || user.staffId)) || null;
+            if (!staffId) continue;
+            const staffKey = staffId.toString();
+            const userRole = user.role;
+            const roleHolidays = holidayByRole.get(userRole) || new Set();
+            const roleWorkDays = workDayMap.get(userRole) || new Map();
+            let cur = new Date(startStr + 'T00:00:00');
+            const end = new Date(endDateExclusive);
+            const days = {};
+            const counts = { hadir: 0, sakit: 0, izin: 0, cuti: 0, alpha: 0 };
+
+            while (cur < end) {
+                const dateStr = cur.toLocaleDateString('en-CA');
+                let ch = '';
+                let attendanceId = null;
+                let isPastOrToday = cur.getTime() <= today.getTime() || today.toLocaleDateString('en-CA') === dateStr;
+
+                const leaveType = leaveMap.get(`${staffKey}_${dateStr}`);
+                const attDoc = attendanceMap.get(`${staffKey}_${dateStr}`);
+                const hasRecords = recordSet.has(`${staffKey}_${dateStr}`);
+
+                if (leaveType) {
+                    ch = statusChar[leaveType] || leaveType.charAt(0).toUpperCase();
+                } else if (attDoc) {
+                    ch = statusChar[attDoc.status] || attDoc.status.charAt(0).toUpperCase();
+                    attendanceId = attDoc._id ? attDoc._id.toString() : null;
+                } else if (!isPastOrToday || allRoleHolidays.has(dateStr) || roleHolidays.has(dateStr)) {
+                    ch = '';
+                } else {
+                    const dayName = dayNames[cur.getDay()];
+                    const isWorkDay = roleWorkDays.get(dayName) === true;
+                    if (isWorkDay) {
+                        ch = hasRecords ? 'H' : 'A';
+                    }
+                }
+
+                if (ch) {
+                    days[dateStr] = attendanceId ? { ch, id: attendanceId } : { ch };
+                    if (ch === 'H') counts.hadir++;
+                    else if (ch === 'S') counts.sakit++;
+                    else if (ch === 'I') counts.izin++;
+                    else if (ch === 'C') counts.cuti++;
+                    else if (ch === 'A') counts.alpha++;
+                }
+                cur.setDate(cur.getDate() + 1);
+            }
+
+            rows.push({
+                staffId: staffKey,
+                name: user.name,
+                role: userRole,
+                days,
+                counts
+            });
+        }
+
+        rows.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+
+        res.json({ data: rows, total: rows.length, page: 1, pages: 1 });
+    } catch (err) {
+        console.error('Error computing attendance matrix:', err);
+        res.status(500).json({ message: 'Error computing attendance matrix' });
+    }
+};
+
+// Authenticated, permission-checked photo serving (photos are sensitive — never expose statically)
+exports.serveRecordPhoto = async (req, res) => {
+    try {
+        const record = await Record.findById(req.params.id).select('staffId photo');
+        if (!record || !record.photo) {
+            return res.status(404).json({ message: 'Foto tidak ditemukan.' });
+        }
+        const isAdmin = req.user && req.user.role === 'admin';
+        const isOwner = req.user && req.user.staffId && String(req.user.staffId) === record.staffId.toString();
+        if (!isAdmin && !isOwner) {
+            return res.status(403).json({ message: 'Akses terlarang.' });
+        }
+        const photoPath = getPhotoPath(record.photo);
+        if (!photoPath) {
+            return res.status(404).json({ message: 'Foto tidak ditemukan.' });
+        }
+        res.setHeader('Cache-Control', 'private, max-age=86400');
+        res.sendFile(photoPath);
+    } catch (err) {
+        console.error('Error serving record photo:', err);
+        res.status(500).json({ message: 'Error serving record photo' });
     }
 };
 
@@ -305,6 +626,17 @@ exports.deleteRecord = async (req, res) => {
         if (!deletedRecord) {
             return res.status(404).json({ message: 'Record not found' });
         }
+        deleteStoredPhoto(deletedRecord.photo);
+
+        await logAction({
+            action: 'DELETE_RECORD',
+            targetType: 'Record',
+            targetId: id,
+            description: `Menghapus record mentah absensi (ID: ${id})`,
+            details: { type: deletedRecord.type, timestamp: deletedRecord.timestamp },
+            req
+        });
+
         res.json({ message: 'Record deleted successfully' });
     } catch (err) {
         console.error('Record deletion error:', err);
@@ -313,9 +645,16 @@ exports.deleteRecord = async (req, res) => {
 };
 
 exports.createRecord = async (req, res) => {
-    const { staffId, type, photo } = req.body;
+    const { staffId, type, photo, location, notes } = req.body;
+    const trimmedNotes = typeof notes === 'string' ? notes.trim().slice(0, 500) : '';
 
     try {
+        // Authorization: staff may only clock in/out for themselves. Without this
+        // a logged-in user could pass any staffId and clock in/out on their behalf.
+        if (req.user.role !== 'admin' && String(req.user.staffId || '') !== String(staffId)) {
+            return res.status(403).json({ message: 'Akses terlarang. Anda hanya dapat absen untuk diri sendiri.' });
+        }
+
         const user = await User.findOne({ staffId });
         if (!user) {
             return res.status(404).json({ message: 'User not found for the given staff ID.' });
@@ -340,7 +679,30 @@ exports.createRecord = async (req, res) => {
             return res.status(400).json({ message: 'Hari ini bukan hari kerja Anda.' });
         }
 
-        // Find today's records for the user
+        // Server-side geo-fencing: recompute distance from the office, never trust the client
+        const loc = location || {};
+        const lat = (loc.latitude !== null && loc.latitude !== undefined && loc.latitude !== '') ? Number(loc.latitude) : NaN;
+        const lng = (loc.longitude !== null && loc.longitude !== undefined && loc.longitude !== '') ? Number(loc.longitude) : NaN;
+        const distance = getDistanceFromOfficeMeters(lat, lng);
+
+        if (distance === null || Number.isNaN(distance)) {
+            return res.status(400).json({ message: 'Lokasi tidak valid. Tidak dapat memverifikasi absen.' });
+        }
+
+        if (distance > GEOFENCE_RADIUS) {
+            return res.status(403).json({ message: `Lokasi di luar jangkauan kantor (maks ${GEOFENCE_RADIUS}m).` });
+        }
+
+        const verifiedLocation = {
+            latitude: Number(lat),
+            longitude: Number(lng),
+            distance: Math.round(distance),
+            address: (location && location.address) || undefined
+        };
+
+        // Reject duplicate/invalid submissions BEFORE persisting the photo to disk.
+        // Saving first used to let any repeated POST (or a weekend/holiday request)
+        // write an unbounded number of orphaned files even though it then returned 400.
         const startOfDay = new Date();
         startOfDay.setHours(0, 0, 0, 0);
         const endOfDay = new Date();
@@ -354,19 +716,49 @@ exports.createRecord = async (req, res) => {
         const hasClockedIn = todaysRecords.some(r => r.type === 'clock-in');
         const hasClockedOut = todaysRecords.some(r => r.type === 'clock-out');
 
-        if (type === 'clock-in') {
-            if (hasClockedIn) {
-                return res.status(400).json({ message: 'Anda sudah melakukan absen masuk hari ini.' });
+        if (type === 'clock-in' && hasClockedIn) {
+            return res.status(400).json({ message: 'Anda sudah melakukan absen masuk hari ini.' });
+        }
+        if (type === 'clock-out' && !hasClockedIn) {
+            return res.status(400).json({ message: 'Anda belum melakukan absen masuk hari ini.' });
+        }
+        if (type === 'clock-out' && hasClockedOut) {
+            return res.status(400).json({ message: 'Anda sudah melakukan absen pulang hari ini.' });
+        }
+        if (type !== 'clock-in' && type !== 'clock-out') {
+            return res.status(400).json({ message: 'Tipe absen tidak valid.' });
+        }
+
+        // Photo storage: validate, compress, and persist to disk instead of base64-in-DB
+        let photoUrl = null;
+        if (photo) {
+            const saved = await savePhoto(photo, staffId);
+            if (saved.error) {
+                return res.status(400).json({ message: saved.error });
             }
-            
-            // Create new clock-in record
+            photoUrl = saved.url;
+        }
+
+        const cleanupPhotoOnFailure = (err) => {
+            if (photoUrl) {
+                try { deleteStoredPhoto(photoUrl); } catch (_) { /* non-fatal */ }
+            }
+            throw err;
+        };
+
+        if (type === 'clock-in') {
+            // Create new clock-in record with location
             const newRecord = new Record({
                 staffId,
                 type: 'clock-in',
-                photo,
-                timestamp: new Date()
+                photo: photoUrl,
+                location: verifiedLocation,
+                timestamp: new Date(),
+                notes: trimmedNotes || undefined
             });
-            await newRecord.save();
+            try {
+                await newRecord.save();
+            } catch (err) { cleanupPhotoOnFailure(err); }
 
             // Update Attendance summary
             await Attendance.findOneAndUpdate(
@@ -377,32 +769,52 @@ exports.createRecord = async (req, res) => {
                     status: 'Hadir',
                     date: todayDateString,
                     time: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }),
+                    notes: trimmedNotes || undefined,
                 },
                 { upsert: true, new: true }
             );
             
+            // Notify admins when a staff arrives late (gated by enableLateArrivalAlertAdmin, Phase 3.1)
+            if (await isNotificationEnabled('enableLateArrivalAlertAdmin')) {
+                try {
+                    const settings = await getNotificationSettings();
+                    const threshold = (settings && settings.lateArrivalThresholdMinutes) || 15;
+                    const workDay = await WorkDay.findOne({ day: dayName, role: user.role }).lean();
+                    if (workDay && workDay.startTime) {
+                        const [sh, sm] = String(workDay.startTime).split(':').map(Number);
+                        const start = new Date();
+                        start.setHours(sh, sm, 0, 0);
+                        const minutesLate = Math.floor((new Date() - start) / 60000);
+                        if (minutesLate > threshold) {
+                            await sendNotificationToRole('admin', {
+                                title: 'Karyawan Datang Terlambat',
+                                body: `${user.name} terlambat ${minutesLate} menit.`,
+                                data: { url: '/admin' }
+                            });
+                        }
+                    }
+                } catch (notifErr) {
+                    console.warn('Failed to send late arrival alert:', notifErr);
+                }
+            }
+            
             return res.status(201).json({ message: 'Absen masuk berhasil.', record: newRecord });
 
-        } else if (type === 'clock-out') {
-            if (!hasClockedIn) {
-                return res.status(400).json({ message: 'Anda belum melakukan absen masuk hari ini.' });
-            }
-            if (hasClockedOut) {
-                return res.status(400).json({ message: 'Anda sudah melakukan absen pulang hari ini.' });
-            }
-
-            // Create new clock-out record
+        } else {
+            // type === 'clock-out' — create clock-out record with location
             const newRecord = new Record({
                 staffId,
                 type: 'clock-out',
-                photo,
-                timestamp: new Date()
+                photo: photoUrl,
+                location: verifiedLocation,
+                timestamp: new Date(),
+                notes: trimmedNotes || undefined
             });
-            await newRecord.save();
+            try {
+                await newRecord.save();
+            } catch (err) { cleanupPhotoOnFailure(err); }
 
             return res.status(201).json({ message: 'Absen pulang berhasil.', record: newRecord });
-        } else {
-            return res.status(400).json({ message: 'Tipe absen tidak valid.' });
         }
 
     } catch (err) {
@@ -412,17 +824,31 @@ exports.createRecord = async (req, res) => {
 };
 
 exports.submitAttendance = async (req, res) => {
-    const { staffId, name, status, date, time } = req.body;
+    const { staffId, name, status, date, time, notes } = req.body;
 
-    // Authorization check: non-admins can only submit for themselves
-    if (req.user.role !== 'admin' && req.user.staffId !== staffId) {
-        return res.status(403).json({ message: 'Akses terlarang. Anda hanya dapat mengirim data untuk diri sendiri.' });
+    const isAdmin = req.user.role === 'admin';
+    const isSelf = !!req.user.staffId && String(req.user.staffId) === String(staffId);
+
+    // Non-admins can only report Sakit/Izin for themselves, on today or a past
+    // day (offline reports are replayed later). Anything else would let a staff
+    // mark themselves "Hadir" or fabricate attendance for an arbitrary date.
+    if (!isAdmin) {
+        if (!isSelf) {
+            return res.status(403).json({ message: 'Akses terlarang. Anda hanya dapat mengirim data untuk diri sendiri.' });
+        }
+        if (!['Sakit', 'Izin'].includes(status)) {
+            return res.status(403).json({ message: 'Anda hanya dapat melaporkan status Sakit atau Izin.' });
+        }
+        const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Jakarta' });
+        if (String(date) > todayStr) {
+            return res.status(400).json({ message: 'Tanggal tidak boleh berada di masa depan.' });
+        }
     }
 
     try {
         const attendanceRecord = await Attendance.findOneAndUpdate(
             { staffId, date },
-            { staffId, name, status, date, time },
+            { staffId, name, status, date, time, notes: (typeof notes === 'string' ? notes.trim() : '') || undefined },
             { new: true, upsert: true, runValidators: true }
         );
         res.status(201).json(attendanceRecord);
@@ -438,12 +864,49 @@ exports.submitAttendance = async (req, res) => {
 exports.updateAttendance = async (req, res) => {
     try {
         const { id } = req.params;
-        const updatedAttendance = await Attendance.findByIdAndUpdate(id, req.body, { new: true });
-        if (!updatedAttendance) {
-            return res.status(404).json({ message: 'Attendance record not found' });
+        const { staffId, name, status, date, time, notes } = req.body;
+        const attendancePayload = {
+            staffId,
+            name,
+            status,
+            date,
+            time: time && time !== 'N/A' ? time : (time || 'N/A'),
+            notes: (typeof notes === 'string' ? notes.trim() : '') || undefined
+        };
+
+        let updatedAttendance = null;
+        if (isValidObjectId(id)) {
+            updatedAttendance = await Attendance.findByIdAndUpdate(id, attendancePayload, { new: true, runValidators: true });
         }
+
+        if (!updatedAttendance) {
+            if (!staffId || !name || !status || !date) {
+                return res.status(400).json({ message: 'staffId, name, status, and date are required.' });
+            }
+            updatedAttendance = await Attendance.findOneAndUpdate(
+                { staffId, date },
+                attendancePayload,
+                { new: true, upsert: true, runValidators: true }
+            );
+        }
+
+        if (updatedAttendance.status !== 'Hadir') {
+            await deleteClockRecordsForDate(updatedAttendance.staffId, updatedAttendance.date);
+        }
+
+        await logAction({
+            action: 'UPDATE_ATTENDANCE',
+            targetType: 'Attendance',
+            targetId: updatedAttendance._id,
+            targetName: updatedAttendance.name,
+            description: `Mengubah status kehadiran ${updatedAttendance.name} pada ${updatedAttendance.date} menjadi ${updatedAttendance.status}`,
+            details: { name: updatedAttendance.name, date: updatedAttendance.date, status: updatedAttendance.status },
+            req
+        });
+
         res.json(updatedAttendance);
     } catch (err) {
+        console.error('Error updating attendance record:', err);
         res.status(500).json({ message: 'Error updating attendance record' });
     }
 };
@@ -451,12 +914,38 @@ exports.updateAttendance = async (req, res) => {
 exports.deleteAttendance = async (req, res) => {
     try {
         const { id } = req.params;
-        const deletedAttendance = await Attendance.findByIdAndDelete(id);
-        if (!deletedAttendance) {
+        const staffId = req.query.staffId;
+        const date = req.query.date;
+
+        let deletedAttendance = null;
+        if (isValidObjectId(id)) {
+            deletedAttendance = await Attendance.findByIdAndDelete(id);
+        }
+        if (!deletedAttendance && staffId && date) {
+            deletedAttendance = await Attendance.findOneAndDelete({ staffId, date });
+        }
+
+        const sid = deletedAttendance?.staffId || staffId;
+        const d = deletedAttendance?.date || date;
+        const deletedRecords = (sid && d) ? await deleteClockRecordsForDate(sid, d) : 0;
+
+        if (!deletedAttendance && deletedRecords === 0) {
             return res.status(404).json({ message: 'Attendance record not found' });
         }
+
+        await logAction({
+            action: 'DELETE_ATTENDANCE',
+            targetType: 'Attendance',
+            targetId: deletedAttendance?._id || id,
+            targetName: deletedAttendance?.name,
+            description: `Menghapus data kehadiran ${deletedAttendance?.name || sid} (${d})`,
+            details: { name: deletedAttendance?.name, date: d, status: deletedAttendance?.status, deletedRecords },
+            req
+        });
+
         res.json({ message: 'Attendance record deleted successfully' });
     } catch (err) {
+        console.error('Error deleting attendance record:', err);
         res.status(500).json({ message: 'Error deleting attendance record' });
     }
 };

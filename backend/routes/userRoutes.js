@@ -2,13 +2,17 @@ const express = require('express');
 const router = express.Router();
 const userController = require('../controllers/userController');
 const { authMiddleware, adminMiddleware } = require('../middleware/authMiddleware');
-const { validateRequest, schemas } = require('../middleware/validationMiddleware');
+const { validateRequest, validateParams, schemas } = require('../middleware/validationMiddleware');
 
 router.get('/users', authMiddleware, adminMiddleware, userController.getAllUsers);
 router.post('/users', authMiddleware, adminMiddleware, validateRequest(schemas.createUser), userController.createUser);
 router.put('/users/change-password', authMiddleware, validateRequest(schemas.changePassword), userController.changePassword);
-router.put('/users/:id', authMiddleware, adminMiddleware, validateRequest(schemas.updateUser), userController.updateUser);
-router.delete('/users/:id', authMiddleware, adminMiddleware, userController.deleteUser);
+router.put('/users/:id', authMiddleware, adminMiddleware, validateParams(schemas.params.objectId), validateRequest(schemas.updateUser), userController.updateUser);
+router.delete('/users/:id', authMiddleware, adminMiddleware, validateParams(schemas.params.objectId), userController.deleteUser);
+router.post('/users/:id/reset-password', authMiddleware, adminMiddleware, validateParams(schemas.params.objectId), validateRequest(schemas.resetPassword), userController.resetPassword);
+
+router.get('/users/me/profile', authMiddleware, userController.getMyProfile);
+router.put('/users/me/profile', authMiddleware, validateRequest(schemas.updateMyProfile), userController.updateMyProfile);
 
 router.get('/staff', authMiddleware, adminMiddleware, userController.getAllStaff);
 

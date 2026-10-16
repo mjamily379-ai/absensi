@@ -121,12 +121,12 @@ const processWorkTimeRecordsForExcel = (staffId, staffName, staffRecords, user, 
 
 exports.exportExcel = async (req, res) => {
     try {
-        const { pieChartImage, barChartImage, month, year } = req.body;
+        const { pieChartImage, barChartImage, month, year, role, includeIndividualSheets = true } = req.body;
 
-        // Data fetching and processing logic from the GET endpoint
-        let attendanceQuery = {}, recordQuery = {}, userQuery = {}, holidayQuery = {};
+        // Data fetching and processing logic
+        let attendanceQuery = {}, recordQuery = {}, holidayQuery = {};
         const targetYear = year ? parseInt(year) : new Date().getFullYear();
-        const targetMonth = month ? parseInt(month) : new Date().getMonth() + 1; // Default to current month if not provided
+        const targetMonth = month ? parseInt(month) : new Date().getMonth() + 1; // Default to current month
         const startOfMonth = new Date(targetYear, targetMonth - 1, 1);
         const endOfMonth = new Date(targetYear, targetMonth, 0, 23, 59, 59, 999);
 
@@ -134,24 +134,37 @@ exports.exportExcel = async (req, res) => {
         attendanceQuery.$expr = { $and: [{ $eq: [{ $toInt: { $substr: ["$date", 0, 4] } }, targetYear] }, { $eq: [{ $toInt: { $substr: ["$date", 5, 2] } }, targetMonth] }] };
         recordQuery.timestamp = { $gte: startOfMonth, $lte: endOfMonth };
 
-        const [staff, users, attendance, records, holidays, allWorkDaySettings, allLeaveRequests, ramadanPeriods] = await Promise.all([
-            Staff.find({}), // Retrieve all staff for global report
-            User.find({}), // Retrieve all users for global report
-            Attendance.find(attendanceQuery),
-            Record.find(recordQuery),
-            Holiday.find(holidayQuery),
-            WorkDay.find(),
+        // Scope users by role server-side (also avoids shipping password hashes)
+        const userQuery = {};
+        if (role && role !== 'all') userQuery.role = { $in: [role.toLowerCase()] };
+
+        let [staff, users, attendance, records, holidays, allWorkDaySettings, allLeaveRequests, ramadanPeriods] = await Promise.all([
+            Staff.find({}).select('_id name').lean(),
+            User.find(userQuery).select('-password').lean(),
+            Attendance.find(attendanceQuery).lean(),
+            Record.find(recordQuery).select('staffId timestamp type clockOutStatus notes').lean(),
+            Holiday.find(holidayQuery).lean(),
+            WorkDay.find().lean(),
             LeaveRequest.find({
-                startDate: { $lte: endOfMonth || new Date() },
-                endDate: { $gte: startOfMonth || new Date() },
+                startDate: { $lte: endOfMonth },
+                endDate: { $gte: startOfMonth },
                 status: 'approved'
-            }),
-            RamadanPeriod.find()
+            }).select('staffId leaveType startDate endDate status').lean(),
+            RamadanPeriod.find().lean()
         ]);
+
+        // Filter by role if specified
+        if (role && role !== 'all') {
+            const roleUsers = users.filter(u => u.role && u.role.toLowerCase() === role.toLowerCase());
+            const roleStaffIds = new Set(roleUsers.map(u => u.staffId ? (u.staffId._id ? u.staffId._id.toString() : u.staffId.toString()) : '').filter(Boolean));
+            staff = staff.filter(s => roleStaffIds.has(s._id.toString()));
+            users = roleUsers;
+        }
+
         const allProcessedRecords = [];
         staff.forEach(s => {
             const staffRecords = records.filter(r => r.staffId.toString() === s._id.toString());
-            const user = users.find(u => u.staffId && u.staffId.toString() === s._id.toString());
+            const user = users.find(u => u.staffId && (u.staffId._id ? u.staffId._id.toString() : u.staffId.toString()) === s._id.toString());
             if (user) {
                 const userHolidaySet = new Set(holidays.filter(h => h.role === 'all' || h.role === user.role).map(h => h.date));
                 const processed = processWorkTimeRecordsForExcel(s._id, s.name, staffRecords, user, userHolidaySet, allWorkDaySettings, ramadanPeriods);
@@ -160,17 +173,16 @@ exports.exportExcel = async (req, res) => {
         });
 
         const workbook = new ExcelJS.Workbook();
+        workbook.creator = 'An Najiyah Attendance System';
+        workbook.created = new Date();
 
-        // Add charts to the first sheet
+        // 1. Summary & Charts Sheet
         const summaryAndChartsSheet = workbook.addWorksheet('Summary & Charts');
         
         const addChartToSheet = (base64Data, range) => {
             try {
                 if (!base64Data) return;
-                
-                // Clean the base64 string if it contains the data:image/png;base64, prefix
                 const cleanBase64 = base64Data.replace(/^data:image\/\w+;base64,/, "");
-                
                 const imageId = workbook.addImage({ 
                     base64: cleanBase64, 
                     extension: 'png' 
@@ -178,67 +190,70 @@ exports.exportExcel = async (req, res) => {
                 summaryAndChartsSheet.addImage(imageId, range);
             } catch (imageError) {
                 console.error('Error adding image to Excel:', imageError);
-                // We don't throw here to allow the excel export to continue even if images fail
             }
         };
 
-        if (pieChartImage) {
-            addChartToSheet(pieChartImage, 'A1:G25');
-        }
-        if (barChartImage) {
-            addChartToSheet(barChartImage, 'H1:U25');
-        }
+        if (pieChartImage) addChartToSheet(pieChartImage, 'A1:G25');
+        if (barChartImage) addChartToSheet(barChartImage, 'H1:U25');
 
-        // --- Daily Absensi Report ---
-        const dailyAbsensiSheet = workbook.addWorksheet('Daily Absensi Report');
-
+        // 2. Daily Absensi Report (Matrix)
+        const dailyAbsensiSheet = workbook.addWorksheet('Matriks Absensi Bulanan');
         const daysInMonth = endOfMonth.getDate();
         const shortDayNames = ['Min', 'Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab'];
 
         const monthName = new Date(targetYear, targetMonth - 1).toLocaleString('id-ID', { month: 'long', year: 'numeric' });
-        const monthRow = dailyAbsensiSheet.addRow(['', monthName]);
-        dailyAbsensiSheet.mergeCells(monthRow.number, 2, monthRow.number, 1 + daysInMonth + 5); // +5 for Hadir, Sakit, Izin, Cuti, Alpha
-        monthRow.getCell(2).alignment = { horizontal: 'center' };
-        
+        const monthRow = dailyAbsensiSheet.addRow(['', `LAPORAN KEHADIRAN BULANAN - ${monthName.toUpperCase()}`]);
+        dailyAbsensiSheet.mergeCells(monthRow.number, 2, monthRow.number, 1 + daysInMonth + 5);
+        monthRow.getCell(2).alignment = { horizontal: 'center', vertical: 'middle' };
+        monthRow.getCell(2).font = { bold: true, size: 13, color: { argb: 'FFFFFFFF' } };
+        monthRow.getCell(2).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1B4D3E' } };
+
         const dayNamesHeader = [''];
-        const dateNumberHeader = ['nama'];
+        const dateNumberHeader = ['Nama Staff'];
         for (let i = 1; i <= daysInMonth; i++) {
             const date = new Date(targetYear, targetMonth - 1, i);
             dayNamesHeader.push(shortDayNames[date.getDay()]);
             dateNumberHeader.push(i);
         }
-        dayNamesHeader.push('Hadir', 'Sakit', 'Izin', 'Cuti', 'Alpha'); // Placeholders for all summary columns
-        dateNumberHeader.push('Total', 'Total', 'Total', 'Total', 'Total'); // Placeholders for all summary columns
-        dailyAbsensiSheet.addRow(dayNamesHeader);
-        dailyAbsensiSheet.addRow(dateNumberHeader);
+        dayNamesHeader.push('Hadir', 'Sakit', 'Izin', 'Cuti', 'Alpha');
+        dateNumberHeader.push('Total H', 'Total S', 'Total I', 'Total C', 'Total A');
+        
+        const rowDayNames = dailyAbsensiSheet.addRow(dayNamesHeader);
+        const rowDateNumber = dailyAbsensiSheet.addRow(dateNumberHeader);
 
         dailyAbsensiSheet.mergeCells(monthRow.number, 1, monthRow.number + 2, 1);
-        dailyAbsensiSheet.getCell(monthRow.number, 1).value = 'nama';
-        dailyAbsensiSheet.getCell(monthRow.number, 1).alignment = { vertical: 'middle', horizontal: 'center' };
+        const nameHeaderCell = dailyAbsensiSheet.getCell(monthRow.number, 1);
+        nameHeaderCell.value = 'Nama Staff';
+        nameHeaderCell.alignment = { vertical: 'middle', horizontal: 'center' };
+        nameHeaderCell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+        nameHeaderCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1B4D3E' } };
 
-        dailyAbsensiSheet.getColumn(1).width = 25;
-        for (let i = 1; i <= daysInMonth; i++) {
-            dailyAbsensiSheet.getColumn(i + 1).width = 5;
-            dailyAbsensiSheet.getColumn(i + 1).alignment = { horizontal: 'center' };
-        }
-        dailyAbsensiSheet.getColumn(daysInMonth + 2).width = 10; // Width for Jumlah Hadir column
-        dailyAbsensiSheet.getColumn(daysInMonth + 2).alignment = { horizontal: 'center' };
-        dailyAbsensiSheet.getColumn(daysInMonth + 3).width = 10; // Width for Jumlah Sakit column
-        dailyAbsensiSheet.getColumn(daysInMonth + 3).alignment = { horizontal: 'center' };
-        dailyAbsensiSheet.getColumn(daysInMonth + 4).width = 10; // Width for Jumlah Izin column
-        dailyAbsensiSheet.getColumn(daysInMonth + 4).alignment = { horizontal: 'center' };
-        dailyAbsensiSheet.getColumn(daysInMonth + 5).width = 10; // Width for Jumlah Cuti column
-        dailyAbsensiSheet.getColumn(daysInMonth + 5).alignment = { horizontal: 'center' };
-        dailyAbsensiSheet.getColumn(daysInMonth + 6).width = 10; // Width for Jumlah Alpha column
-        dailyAbsensiSheet.getColumn(daysInMonth + 6).alignment = { horizontal: 'center' };
-        
-        const dailyAbsensiReportData = [];
-        const attendanceMap = new Map(); // Map<staffId_date, status>
-        attendance.forEach(att => {
-            attendanceMap.set(`${att.staffId.toString()}_${att.date}`, att.status);
+        // Style the headers
+        [rowDayNames, rowDateNumber].forEach(row => {
+            row.eachCell((cell, colNumber) => {
+                if (colNumber > 1) {
+                    cell.alignment = { horizontal: 'center', vertical: 'middle' };
+                    cell.font = { bold: true, size: 10 };
+                    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F5F9' } };
+                    cell.border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+                }
+            });
         });
 
-        const leaveRequestMap = new Map(); // Map<staffId_date, leaveType>
+        dailyAbsensiSheet.getColumn(1).width = 28;
+        for (let i = 1; i <= daysInMonth; i++) {
+            dailyAbsensiSheet.getColumn(i + 1).width = 4.5;
+            dailyAbsensiSheet.getColumn(i + 1).alignment = { horizontal: 'center' };
+        }
+        for (let j = 0; j < 5; j++) {
+            dailyAbsensiSheet.getColumn(daysInMonth + 2 + j).width = 9;
+            dailyAbsensiSheet.getColumn(daysInMonth + 2 + j).alignment = { horizontal: 'center' };
+        }
+        
+        const attendanceMap = new Map();
+        attendance.forEach(att => attendanceMap.set(`${att.staffId.toString()}_${att.date}`, att.status));
+
+        const leaveRequestMap = new Map();
         allLeaveRequests.forEach(lr => {
             let currentDate = new Date(lr.startDate);
             const endDate = new Date(lr.endDate);
@@ -253,30 +268,25 @@ exports.exportExcel = async (req, res) => {
             const rowData = [s.name];
             const today = new Date();
             today.setHours(0, 0, 0, 0);
-            let hadirCount = 0; // Initialize hadir count for each staff
-            let sakitCount = 0; // Initialize sakit count for each staff
-            let izinCount = 0; // Initialize izin count for each staff
-            let cutiCount = 0; // Initialize cuti count for each staff
-            let alphaCount = 0; // Initialize alpha count for each staff
+            let hadirCount = 0, sakitCount = 0, izinCount = 0, cutiCount = 0, alphaCount = 0;
 
             for (let i = 1; i <= daysInMonth; i++) {
                 const date = new Date(targetYear, targetMonth - 1, i);
                 let statusChar = '';
 
-                if (date > today) { // Dates in the future should be blank
+                if (date > today) {
                     statusChar = '';
                 } else {
-                    const dateString = date.toLocaleDateString('en-CA'); // YYYY-MM-DD
+                    const dateString = date.toLocaleDateString('en-CA');
                     const staffId = s._id.toString();
                     const attStatus = attendanceMap.get(`${staffId}_${dateString}`);
                     const leaveStatus = leaveRequestMap.get(`${staffId}_${dateString}`);
 
                     const currentDayName = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'][date.getDay()];
-                    const user = users.find(u => u.staffId && u.staffId.toString() === staffId);
+                    const user = users.find(u => u.staffId && (u.staffId._id ? u.staffId._id.toString() : u.staffId.toString()) === staffId);
                     const userRole = user ? user.role : 'staff';
                     const userWorkDay = allWorkDaySettings.find(wd => wd.role === userRole && wd.day === currentDayName);
 
-                    // Define holidaySet for this specific user's role
                     const staffHolidaySet = new Set(holidays.filter(h => h.role === 'all' || h.role === userRole).map(h => h.date));
                     const isHoliday = staffHolidaySet.has(dateString);
                     const isWorkDay = userWorkDay && userWorkDay.isWorkDay;
@@ -292,45 +302,70 @@ exports.exportExcel = async (req, res) => {
                     }
                 }
                 rowData.push(statusChar);
-                if (statusChar === 'H') { // Count Hadir status
-                    hadirCount++;
-                } else if (statusChar === 'S') { // Count Sakit status
-                    sakitCount++;
-                } else if (statusChar === 'I') { // Count Izin status
-                    izinCount++;
-                } else if (statusChar === 'C') { // Count Cuti status
-                    cutiCount++;
-                } else if (statusChar === 'A') { // Count Alpha status
-                    alphaCount++;
-                }
+                if (statusChar === 'H') hadirCount++;
+                else if (statusChar === 'S') sakitCount++;
+                else if (statusChar === 'I') izinCount++;
+                else if (statusChar === 'C') cutiCount++;
+                else if (statusChar === 'A') alphaCount++;
             }
-            rowData.push(hadirCount, sakitCount, izinCount, cutiCount, alphaCount); // Add all total counts at the end of the row
-            dailyAbsensiReportData.push(rowData);
+            rowData.push(hadirCount, sakitCount, izinCount, cutiCount, alphaCount);
+            const addedRow = dailyAbsensiSheet.addRow(rowData);
+            
+            // Format and highlight matrix cells
+            addedRow.eachCell((cell, colIdx) => {
+                cell.border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+                if (colIdx > 1 && colIdx <= daysInMonth + 1) {
+                    const val = cell.value;
+                    if (val === 'H') {
+                        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8F5E9' } };
+                        cell.font = { color: { argb: 'FF2E7D32' }, bold: true };
+                    } else if (val === 'S') {
+                        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF3E0' } };
+                        cell.font = { color: { argb: 'FFE65100' }, bold: true };
+                    } else if (val === 'I') {
+                        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE1F5FE' } };
+                        cell.font = { color: { argb: 'FF0277BD' }, bold: true };
+                    } else if (val === 'C') {
+                        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF3E5F5' } };
+                        cell.font = { color: { argb: 'FF7B1FA2' }, bold: true };
+                    } else if (val === 'A') {
+                        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFEBEE' } };
+                        cell.font = { color: { argb: 'FFC62828' }, bold: true };
+                    }
+                } else if (colIdx > daysInMonth + 1) {
+                    cell.font = { bold: true };
+                }
+            });
         }
-        dailyAbsensiSheet.addRows(dailyAbsensiReportData);
-        // --- END Daily Absensi Report ---
 
-        // 2. Daily Work Activity
-        const dailyWorkActivitySheet = workbook.addWorksheet('Daily Work Activity');
+        // 3. Daily Work Activity Sheet
+        const dailyWorkActivitySheet = workbook.addWorksheet('Aktivitas Kerja Harian');
         dailyWorkActivitySheet.columns = [
             { header: 'Nama Staff', key: 'name', width: 25 },
             { header: 'Role', key: 'role', width: 20 },
             { header: 'Tanggal', key: 'date', width: 15 },
-            { header: 'Status Kehadiran', key: 'status', width: 15 },
+            { header: 'Status Kehadiran', key: 'status', width: 18 },
             { header: 'Jam Masuk (Aktual)', key: 'clockInTime', width: 20 },
             { header: 'Jam Pulang (Aktual)', key: 'clockOutTime', width: 20 },
-            { header: 'Total Jam Kerja (Aktual)', key: 'totalHours', width: 20 },
+            { header: 'Total Jam Kerja', key: 'totalHours', width: 20 },
             { header: 'Keterangan Masuk', key: 'keteranganMasuk', width: 20 },
             { header: 'Keterangan Pulang', key: 'keteranganPulang', width: 20 },
-            { header: 'Catatan Admin', key: 'adminNotes', width: 20 },
+            { header: 'Catatan Admin', key: 'adminNotes', width: 25 },
         ];
+        
+        // Header style
+        dailyWorkActivitySheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+        dailyWorkActivitySheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1B4D3E' } };
+        dailyWorkActivitySheet.getRow(1).height = 25;
+
         const dailyWorkActivityData = [];
         for (const att of attendance) {
-            const user = users.find(u => u.staffId && u.staffId.toString() === att.staffId.toString());
+            const user = users.find(u => u.staffId && (u.staffId._id ? u.staffId._id.toString() : u.staffId.toString()) === att.staffId.toString());
+            if (!user && role && role !== 'all') continue;
             const procRec = allProcessedRecords.find(pr => pr.staffId.toString() === att.staffId.toString() && pr.date === att.date);
             dailyWorkActivityData.push({
                 name: att.name,
-                role: user?.role || 'N/A',
+                role: user?.role || 'Staff',
                 date: att.date,
                 status: att.status,
                 clockInTime: procRec ? procRec.clockInTime : 'N/A',
@@ -343,11 +378,11 @@ exports.exportExcel = async (req, res) => {
         }
         dailyWorkActivitySheet.addRows(dailyWorkActivityData);
 
-        // 3. Monthly Recap
-        const monthlyRecapSheet = workbook.addWorksheet('Monthly Recap');
+        // 4. Monthly Recap Sheet
+        const monthlyRecapSheet = workbook.addWorksheet('Rekapitulasi Bulanan');
         monthlyRecapSheet.columns = [
             { header: 'Nama Staff', key: 'name', width: 25 },
-            { header: 'Role', key: 'role', width: 15 },
+            { header: 'Role', key: 'role', width: 18 },
             { header: 'Bulan', key: 'month', width: 15 },
             { header: 'Tahun', key: 'year', width: 10 },
             { header: 'Jumlah Hadir', key: 'totalHadir', width: 15 },
@@ -364,6 +399,11 @@ exports.exportExcel = async (req, res) => {
             { header: 'Total Jam Kerja Bulanan', key: 'totalMonthlyHours', width: 25 },
             { header: 'Rata-rata Jam Kerja Harian', key: 'avgDailyHours', width: 25 },
         ];
+        
+        monthlyRecapSheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+        monthlyRecapSheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1B4D3E' } };
+        monthlyRecapSheet.getRow(1).height = 25;
+
         const monthlyRecapData = [];
         const monthlyAggregates = new Map();
 
@@ -378,7 +418,7 @@ exports.exportExcel = async (req, res) => {
                 monthlyAggregates.set(key, {
                     staffId: staffIdKey,
                     name: att.name,
-                    role: users.find(u => u.staffId && u.staffId.toString() === staffIdKey)?.role || 'N/A',
+                    role: users.find(u => u.staffId && (u.staffId._id ? u.staffId._id.toString() : u.staffId.toString()) === staffIdKey)?.role || 'Staff',
                     month: date.toLocaleString('id-ID', { month: 'long' }),
                     year: yearKey,
                     totalHadir: 0,
@@ -427,10 +467,11 @@ exports.exportExcel = async (req, res) => {
                 }
                 if (procRec.keteranganPulang) {
                     if (procRec.keteranganPulang === 'Pulang Lebih Awal') aggregate.totalPulangLebihAwal++;
-                                    if (procRec.keteranganPulang === 'Tepat Waktu') aggregate.totalTepatWaktuPulang++;
-                                    if (procRec.keteranganPulang === 'Long Shift') aggregate.totalLongShift++;
-                                }
-                            }        }
+                    if (procRec.keteranganPulang === 'Tepat Waktu') aggregate.totalTepatWaktuPulang++;
+                    if (procRec.keteranganPulang === 'Long Shift') aggregate.totalLongShift++;
+                }
+            }
+        }
 
         for (const [key, aggregate] of monthlyAggregates.entries()) {
             const totalMonthlyHoursFormatted = `${Math.floor(aggregate.totalWorkHoursInMinutes / 60)} jam ${Math.round(aggregate.totalWorkHoursInMinutes % 60)} menit`;
@@ -445,8 +486,51 @@ exports.exportExcel = async (req, res) => {
         }
         monthlyRecapSheet.addRows(monthlyRecapData);
 
+        // 5. Individual Tab per Staff (Optional / Default true for Bulk)
+        if (includeIndividualSheets) {
+            staff.forEach((s, idx) => {
+                const user = users.find(u => u.staffId && (u.staffId._id ? u.staffId._id.toString() : u.staffId.toString()) === s._id.toString());
+                const staffProcRecords = allProcessedRecords.filter(pr => pr.staffId.toString() === s._id.toString());
+                
+                let cleanSheetName = `${idx + 1}. ${s.name}`.replace(/[\\/?*:[\]]/g, '').trim().substring(0, 30);
+                const staffSheet = workbook.addWorksheet(cleanSheetName);
+
+                staffSheet.columns = [
+                    { header: 'Tanggal', key: 'date', width: 15 },
+                    { header: 'Status', key: 'status', width: 15 },
+                    { header: 'Jam Masuk', key: 'clockInTime', width: 18 },
+                    { header: 'Jam Pulang', key: 'clockOutTime', width: 18 },
+                    { header: 'Total Jam', key: 'totalHours', width: 20 },
+                    { header: 'Keterangan Masuk', key: 'keteranganMasuk', width: 22 },
+                    { header: 'Keterangan Pulang', key: 'keteranganPulang', width: 22 },
+                    { header: 'Catatan', key: 'notes', width: 25 },
+                ];
+
+                staffSheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+                staffSheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1B4D3E' } };
+
+                const rows = staffProcRecords.map(pr => {
+                    const att = attendance.find(a => a.staffId.toString() === s._id.toString() && a.date === pr.date);
+                    return {
+                        date: pr.date,
+                        status: att ? att.status : 'Hadir',
+                        clockInTime: pr.clockInTime,
+                        clockOutTime: pr.clockOutTime,
+                        totalHours: pr.totalHours,
+                        keteranganMasuk: pr.keteranganMasuk,
+                        keteranganPulang: pr.keteranganPulang,
+                        notes: pr.notes,
+                    };
+                });
+                staffSheet.addRows(rows);
+            });
+        }
+
+        const fileNameRole = role && role !== 'all' ? `_${role.replace(/\s+/g, '_')}` : '';
+        const finalFileName = `Laporan_Absensi_Bulk${fileNameRole}_${targetMonth}-${targetYear}.xlsx`;
+
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        res.setHeader('Content-Disposition', 'attachment; filename=' + `Attendance_Report.xlsx`);
+        res.setHeader('Content-Disposition', `attachment; filename="${finalFileName}"`);
         await workbook.xlsx.write(res);
         res.end();
     } catch (err) {
@@ -460,6 +544,11 @@ exports.exportPersonalExcel = async (req, res) => {
     const { staffId, month, year } = req.query;
     if (!staffId) {
       return res.status(400).send('Staff ID is required for personal export.');
+    }
+
+    // IDOR guard: staff may only export their own attendance report.
+    if (req.user.role !== 'admin' && String(req.user.staffId || '') !== String(staffId)) {
+      return res.status(403).send('Akses terlarang. Anda hanya dapat mengekspor data sendiri.');
     }
 
     let attendanceQuery = { staffId: new mongoose.Types.ObjectId(staffId) }, 
@@ -488,19 +577,19 @@ exports.exportPersonalExcel = async (req, res) => {
     recordQuery.timestamp = { $gte: startPeriod, $lte: endPeriod };
 
     const [staffDetails, userDetails, attendanceData, recordsData, holidays, allWorkDaySettings, personalLeaveRequests, ramadanPeriods] = await Promise.all([
-      Staff.findById(staffId),
-      User.findOne({ staffId: staffId }),
-      Attendance.find(attendanceQuery),
-      Record.find(recordQuery),
-      Holiday.find(holidayQuery),
-      WorkDay.find(),
+      Staff.findById(staffId).select('_id name').lean(),
+      User.findOne({ staffId: staffId }).select('-password -tokenVersion').lean(),
+      Attendance.find(attendanceQuery).lean(),
+      Record.find(recordQuery).select('staffId timestamp type clockOutStatus notes').lean(),
+      Holiday.find(holidayQuery).lean(),
+      WorkDay.find().lean(),
       LeaveRequest.find({ 
           staffId: new mongoose.Types.ObjectId(staffId),
           startDate: { $lte: endPeriod },
           endDate: { $gte: startPeriod },
           status: 'approved'
-      }),
-      RamadanPeriod.find()
+      }).select('staffId leaveType startDate endDate status').lean(),
+      RamadanPeriod.find().lean()
     ]);
 
     if (!staffDetails || !userDetails) {

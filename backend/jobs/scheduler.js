@@ -6,12 +6,22 @@ const RamadanPeriod = require('../models/ramadanModel');
 const Attendance = require('../models/attendanceModel');
 const LeaveRequest = require('../models/leaveRequestModel');
 const Record = require('../models/recordModel');
-const { sendPushNotification, getSubscriptions } = require('../services/notificationService');
+const { sendPushNotification, getSubscriptions, getNotificationSettings, isNotificationEnabled } = require('../services/notificationService');
+const { syncAllApprovedLeaveRequests } = require('../services/leaveSyncService');
+
+// Read the threshold/kickoff minutes once per job run (settings are cached 60s inside the service).
+const resolveMinutesBefore = (settings, key, fallback) => {
+    const value = settings && settings[key];
+    return (typeof value === 'number' && value >= 0) ? value : fallback;
+};
 
 const initScheduledJobs = () => {
     // 1. Attendance Reminders (Morning)
     cron.schedule('0,15,30,45 5-8 * * *', async () => {
-        console.log('Running cron: Morning Attendance Reminders...');
+        if (!(await isNotificationEnabled('enableMorningReminder'))) return;
+        const settings = await getNotificationSettings();
+        const minutesBefore = resolveMinutesBefore(settings, 'morningReminderMinutesBefore', 15);
+        const message = (settings && settings.morningReminderMessage) || 'Jangan lupa untuk absen masuk hari ini, {name}!';
         const today = new Date();
         const dateString = today.toLocaleDateString('en-CA');
         const dayName = today.toLocaleDateString('id-ID', { weekday: 'long' });
@@ -54,15 +64,16 @@ const initScheduledJobs = () => {
                     const currentTime = new Date();
                     currentTime.setSeconds(0, 0);
 
-                    if (currentTime >= new Date(startTimeToday.getTime() - 15 * 60000) && 
+                    if (currentTime >= new Date(startTimeToday.getTime() - minutesBefore * 60000) && 
                         currentTime <= new Date(startTimeToday.getTime() + 15 * 60000)) {
                         
                         const userSub = subscriptions.find(sub => sub.userId === user._id.toString());
                         if (userSub) {
                             sendPushNotification(userSub.subscription, JSON.stringify({
                                 title: 'Pengingat Absen Masuk',
-                                body: `Jangan lupa untuk absen masuk hari ini, ${user.staffId.name}!`,
-                                icon: '/LOGO1.png'
+                                body: message.replace('{name}', user.staffId.name),
+                                icon: '/LOGO1.png',
+                                data: { url: '/' }
                             }));
                         }
                     }
@@ -75,7 +86,10 @@ const initScheduledJobs = () => {
 
     // 2. Evening Clock-out Reminders
     cron.schedule('0,15,30,45 12-17 * * *', async () => {
-        console.log('Running cron: Evening Clock-out Reminders...');
+        if (!(await isNotificationEnabled('enableEveningReminder'))) return;
+        const settings = await getNotificationSettings();
+        const minutesBefore = resolveMinutesBefore(settings, 'eveningReminderMinutesBefore', 15);
+        const message = (settings && settings.eveningReminderMessage) || 'Jangan lupa untuk absen pulang hari ini, {name}!';
         const today = new Date();
         const dateString = today.toLocaleDateString('en-CA');
         const dayName = today.toLocaleDateString('id-ID', { weekday: 'long' });
@@ -135,8 +149,9 @@ const initScheduledJobs = () => {
                         if (userSub) {
                             sendPushNotification(userSub.subscription, JSON.stringify({
                                 title: 'Pengingat Absen Pulang',
-                                body: `Jangan lupa untuk absen pulang hari ini, ${user.staffId.name}!`,
-                                icon: '/LOGO1.png'
+                                body: message.replace('{name}', user.staffId.name),
+                                icon: '/LOGO1.png',
+                                data: { url: '/' }
                             }));
                         }
                     }
@@ -149,7 +164,7 @@ const initScheduledJobs = () => {
 
     // 3. Late Warning (20:30)
     cron.schedule('30 20 * * *', async () => {
-        console.log('Running cron: Late Warning...');
+        if (!(await isNotificationEnabled('enableAbsentAlert'))) return;
         const today = new Date();
         const dateString = today.toLocaleDateString('en-CA');
         const dayName = today.toLocaleDateString('id-ID', { weekday: 'long' });
@@ -184,7 +199,8 @@ const initScheduledJobs = () => {
                         sendPushNotification(userSub.subscription, JSON.stringify({
                             title: 'Peringatan Absensi',
                             body: `Anda belum absen hari ini, ${user.staffId.name}! Anda akan ditandai Alpha jika tidak absen dalam waktu dekat.`,
-                            icon: '/LOGO1.png'
+                            icon: '/LOGO1.png',
+                            data: { url: '/' }
                         }));
                     }
                 }
@@ -196,7 +212,7 @@ const initScheduledJobs = () => {
 
     // 4. Mark Absent (23:00)
     cron.schedule('0 23 * * *', async () => {
-        console.log('Running cron: Marking Absent...');
+        if (!(await isNotificationEnabled('enableAbsentAlert'))) return;
         const today = new Date();
         const dateString = today.toLocaleDateString('en-CA');
         const dayName = today.toLocaleDateString('id-ID', { weekday: 'long' });
@@ -232,11 +248,19 @@ const initScheduledJobs = () => {
                         date: dateString,
                         time: '23:00',
                     }).save();
-                    console.log(`Marked Alpha: ${user.staffId.name}`);
                 }
             }
         } catch (error) {
             console.error('Error in Mark Absent:', error);
+        }
+    }, { scheduled: true, timezone: "Asia/Jakarta" });
+// 5. Keep approved leave requests in sync with Attendance (heavy work, off the request path)
+    cron.schedule('15 * * * *', async () => {
+        try {
+            const { synced } = await syncAllApprovedLeaveRequests();
+            if (synced > 0) console.log(`Leave sync: ${synced} approved request(s) verified.`);
+        } catch (err) {
+            console.error('Error in leave sync job:', err);
         }
     }, { scheduled: true, timezone: "Asia/Jakarta" });
 };

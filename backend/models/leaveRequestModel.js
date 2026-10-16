@@ -8,7 +8,11 @@ const LeaveRequestSchema = new mongoose.Schema({
   endDate: { type: Date, required: true },
   reason: { type: String, required: true },
   status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
-  attachment: { type: String }, // For storing URL of uploaded file
+  attachment: { type: String }, // API URL for the server-hosted file (legacy rows may hold base64 data URIs)
+  attachmentName: { type: String }, // Original filename shown to admins
+  attachmentStoredName: { type: String }, // On-disk filename under backend/uploads/leave-docs
+  attachmentType: { type: String }, // MIME type of the stored file
+  attachmentSize: { type: Number }, // Size in bytes
   createdAt: { type: Date, default: Date.now }
 });
 

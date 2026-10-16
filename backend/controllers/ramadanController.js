@@ -1,8 +1,14 @@
 const RamadanPeriod = require('../models/ramadanModel');
+const { getOrSet, invalidate } = require('../services/cache');
+const { logAction } = require('../services/auditService');
 
 exports.getRamadanPeriods = async (req, res) => {
     try {
-        const periods = await RamadanPeriod.find().sort({ year: -1 });
+        const periods = await getOrSet(
+            'ramadan:all',
+            () => RamadanPeriod.find().sort({ year: -1 }).lean(),
+            300000
+        );
         res.json(periods);
     } catch (err) {
         res.status(500).json({ message: 'Error fetching Ramadan periods.' });
@@ -21,6 +27,17 @@ exports.updateRamadanPeriod = async (req, res) => {
             { startDate, endDate },
             { upsert: true, new: true }
         );
+        invalidate('ramadan:');
+
+        await logAction({
+            action: 'UPDATE_RAMADAN_PERIOD',
+            targetType: 'RamadanPeriod',
+            targetId: period._id,
+            targetName: `${year}`,
+            description: `Admin memperbarui periode Ramadhan tahun ${year} (${startDate} s.d. ${endDate})`,
+            details: { year, startDate, endDate },
+            req
+        });
 
         res.json({ message: 'Ramadan period updated successfully.', period });
     } catch (err) {
@@ -31,7 +48,22 @@ exports.updateRamadanPeriod = async (req, res) => {
 exports.deleteRamadanPeriod = async (req, res) => {
     try {
         const { id } = req.params;
-        await RamadanPeriod.findByIdAndDelete(id);
+        const deleted = await RamadanPeriod.findByIdAndDelete(id);
+        if (!deleted) {
+            return res.status(404).json({ message: 'Ramadan period not found.' });
+        }
+        invalidate('ramadan:');
+
+        await logAction({
+            action: 'DELETE_RAMADAN_PERIOD',
+            targetType: 'RamadanPeriod',
+            targetId: id,
+            targetName: `${deleted.year}`,
+            description: `Admin menghapus periode Ramadhan tahun ${deleted.year}`,
+            details: { year: deleted.year, startDate: deleted.startDate, endDate: deleted.endDate },
+            req
+        });
+
         res.json({ message: 'Ramadan period deleted successfully.' });
     } catch (err) {
         res.status(500).json({ message: 'Error deleting Ramadan period.' });

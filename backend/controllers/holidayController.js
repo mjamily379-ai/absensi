@@ -1,5 +1,8 @@
 const Holiday = require('../models/holidayModel');
 const axios = require('axios');
+const { getOrSet, invalidate } = require('../services/cache');
+const { getPagination, buildPaginatedResponse, isPaginatedRequest } = require('../utils/pagination');
+const { logAction } = require('../services/auditService');
 
 exports.getHolidays = async (req, res) => {
     try {
@@ -7,7 +10,21 @@ exports.getHolidays = async (req, res) => {
         if (!year) {
             return res.status(400).json({ message: 'Year query parameter is required.' });
         }
-        const holidays = await Holiday.find({ date: { $regex: `^${year}` } }).sort({ date: 'asc' });
+        const holidays = await getOrSet(
+            `holidays:${year}`,
+            () => Holiday.find({ date: { $regex: `^${year}` } }).sort({ date: 'asc' }).lean(),
+            300000
+        );
+
+        const { page, limit, skip } = getPagination(req);
+        if (isPaginatedRequest(req)) {
+            return res.json(buildPaginatedResponse(
+                holidays.slice(skip, skip + limit),
+                holidays.length,
+                page,
+                limit
+            ));
+        }
         res.json(holidays);
     } catch (err) {
         res.status(500).json({ message: 'Error fetching holidays.' });
@@ -27,6 +44,18 @@ exports.createHoliday = async (req, res) => {
             isNationalHoliday: false
         });
         await newHoliday.save();
+        invalidate('holidays:');
+
+        await logAction({
+            action: 'CREATE_HOLIDAY',
+            targetType: 'Holiday',
+            targetId: newHoliday._id,
+            targetName: name,
+            description: `Admin menambahkan hari libur "${name}" (${date}) untuk role "${role || 'all'}"`,
+            details: { date, name, role },
+            req
+        });
+
         res.status(201).json(newHoliday);
     } catch (err) {
         if (err.code === 11000) {
@@ -43,6 +72,18 @@ exports.deleteHoliday = async (req, res) => {
         if (!deletedHoliday) {
             return res.status(404).json({ message: 'Holiday not found.' });
         }
+        invalidate('holidays:');
+
+        await logAction({
+            action: 'DELETE_HOLIDAY',
+            targetType: 'Holiday',
+            targetId: id,
+            targetName: deletedHoliday.name,
+            description: `Admin menghapus hari libur "${deletedHoliday.name}" (${deletedHoliday.date})`,
+            details: { date: deletedHoliday.date, name: deletedHoliday.name, role: deletedHoliday.role },
+            req
+        });
+
         res.json({ message: 'Holiday deleted successfully.' });
     } catch (err) {
         res.status(500).json({ message: 'Error deleting holiday.' });
@@ -85,6 +126,17 @@ exports.syncHolidays = async (req, res) => {
         }));
 
         const result = await Holiday.bulkWrite(operations);
+        invalidate('holidays:');
+
+        await logAction({
+            action: 'SYNC_HOLIDAYS',
+            targetType: 'Holiday',
+            targetName: `${year}`,
+            description: `Admin menyinkronkan hari libur nasional tahun ${year}`,
+            details: { year, synced: result.upsertedCount + result.modifiedCount + result.matchedCount },
+            req
+        });
+
         res.status(200).json({
             message: 'Sinkronisasi berhasil.',
             synced: result.upsertedCount + result.modifiedCount + result.matchedCount,
