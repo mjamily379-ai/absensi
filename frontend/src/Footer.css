@@ -1,7 +1,57 @@
+/* Footer Component Styles */
+
 .footer {
-  background-color: #e1e66e;
-  color: var(--text-color);
+  background: linear-gradient(180deg, var(--bg-card) 0%, var(--bg-main) 100%);
+  color: var(--text-muted);
   text-align: center;
-  padding: 1rem;
-  border-top: 1px solid rgba(0, 0, 0, 0.1);
+  padding: 1.5rem 1rem;
+  border-top: 1px solid var(--border-light);
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 0.82rem;
+}
+
+.footer-content {
+  max-width: 1000px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.footer-brand {
+  font-weight: 700;
+  color: var(--primary-green);
+  font-size: 0.88rem;
+}
+
+.footer-tagline {
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.footer-divider {
+  width: 40px;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent-green), transparent);
+  margin: 0.4rem 0;
+  border-radius: 2px;
+}
+
+.footer-copyright {
+  font-size: 0.72rem;
+  color: var(--text-light);
+  letter-spacing: 0.2px;
+}
+
+@media (max-width: 768px) {
+  .footer {
+    padding-bottom: calc(70px + 1.5rem);
+  }
+  
+  @supports (padding-bottom: env(safe-area-inset-bottom)) {
+    .footer {
+      padding-bottom: calc(70px + 1.5rem + env(safe-area-inset-bottom));
+    }
+  }
 }

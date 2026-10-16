@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import api from './api';
-import { Card, Container, Row, Col, Badge, Modal, Button } from 'react-bootstrap';
+import { Card, Container, Row, Col, Badge, Modal, Button, ProgressBar, Form } from 'react-bootstrap';
 import { toast } from 'react-toastify';
 import confetti from 'canvas-confetti';
 import { 
@@ -14,9 +14,13 @@ import {
   Trophy, 
   Activity, 
   AlertCircle, 
-  Bell
+  Bell,
+  Flame,
+  TrendingUp,
+  Sparkles
 } from 'lucide-react';
 import type { Attendance, WorkTimeRecord, User, Announcement, LeaveRequest } from './types';
+import { extractStaffId } from './types';
 import PersonalAttendanceReport from './PersonalAttendanceReport';
 import './MainApp.css';
 
@@ -46,6 +50,7 @@ const ISLAMIC_QUOTES = [
 ];
 
 const MainApp: React.FC<MainAppProps> = ({ user, onLogout }) => {
+  const staffIdStr = useMemo(() => (user.staffId ? extractStaffId(user.staffId) : null), [user.staffId]);
   const [attendance, setAttendance] = useState<Attendance[]>([]);
   const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>([]);
   const [clockStatus, setClockStatus] = useState<'in' | 'out' | 'finished'>('out');
@@ -56,6 +61,27 @@ const MainApp: React.FC<MainAppProps> = ({ user, onLogout }) => {
   const [userRanking, setUserRanking] = useState<{ rank: number; total: number; label: string } | null>(null);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [currentQuote] = useState(() => ISLAMIC_QUOTES[Math.floor(Math.random() * ISLAMIC_QUOTES.length)]);
+
+  // Entry modal state (clock-in notes / Sakit-Izin reason)
+  const [showEntryModal, setShowEntryModal] = useState(false);
+  const [entryAction, setEntryAction] = useState<'clock-in' | 'clock-out' | 'Sakit' | 'Izin'>('Sakit');
+  const [entryNotes, setEntryNotes] = useState('');
+
+  const openEntryModal = (action: 'clock-in' | 'clock-out' | 'Sakit' | 'Izin') => {
+    setEntryAction(action);
+    setEntryNotes('');
+    setShowEntryModal(true);
+  };
+
+  const handleEntryModalConfirm = () => {
+    const trimmed = entryNotes.trim();
+    setShowEntryModal(false);
+    if (entryAction === 'clock-in' || entryAction === 'clock-out') {
+      processAttendance(entryAction, trimmed || undefined);
+    } else {
+      handleOtherStatus(entryAction, trimmed || undefined);
+    }
+  };
 
   // Announcement Modal State
   const [selectedAnnouncement, setSelectedAnnouncement] = useState<Announcement | null>(null);
@@ -95,13 +121,13 @@ const MainApp: React.FC<MainAppProps> = ({ user, onLogout }) => {
   }, []);
 
   const fetchUserAttendance = useCallback(async () => {
-    if (user.staffId) {
+    if (staffIdStr) {
       try {
         const response = await api.get('/api/attendance');
-        setAttendance(response.data.filter((a: Attendance) => a.staffId === user.staffId!));
+        setAttendance(response.data.filter((a: Attendance) => extractStaffId(a.staffId) === staffIdStr));
       } catch (error) { console.error("Error fetching attendance:", error); }
     }
-  }, [user.staffId]);
+  }, [staffIdStr]);
 
   const fetchAnnouncements = useCallback(async () => {
     try {
@@ -116,7 +142,7 @@ const MainApp: React.FC<MainAppProps> = ({ user, onLogout }) => {
     try {
       const response = await api.get('/api/attendance/ranking');
       const rankings = response.data;
-      const myPos = rankings.findIndex((r: any) => String(r.staffId) === String(user.staffId));
+      const myPos = rankings.findIndex((r: any) => String(r.staffId) === String(staffIdStr));
       if (myPos !== -1) {
         const rank = myPos + 1;
         let label = 'Pejuang Disiplin';
@@ -124,12 +150,12 @@ const MainApp: React.FC<MainAppProps> = ({ user, onLogout }) => {
         else if (rank <= 5) label = 'Top 5 Disiplin';
         setUserRanking({ rank, total: rankings.length, label });
       } else {
-        console.log('User not found in rankings. User staffId:', user.staffId, 'Rankings:', rankings);
+        console.log('User not found in rankings. User staffId:', staffIdStr, 'Rankings:', rankings);
       }
     } catch (error) {
       console.error('Error fetching rankings:', error);
     }
-  }, [user.staffId]);
+  }, [staffIdStr]);
 
   const fetchLeaveRequests = useCallback(async () => {
     try {
@@ -151,19 +177,36 @@ const MainApp: React.FC<MainAppProps> = ({ user, onLogout }) => {
   };
 
   useEffect(() => {
-    if (user.staffId) {
-      fetchRecords(user.staffId!);
+    if (staffIdStr) {
+      fetchRecords(staffIdStr);
       fetchUserAttendance();
       fetchAnnouncements();
       fetchRanking();
       fetchLeaveRequests();
     }
-    const interval = setInterval(() => {
-      fetchUserAttendance();
+    const leaveInterval = setInterval(() => {
       fetchLeaveRequests();
-    }, 10000);
-    return () => clearInterval(interval);
-  }, [user.staffId, fetchRecords, fetchUserAttendance, fetchAnnouncements, fetchRanking, fetchLeaveRequests]);
+    }, 30000); // Light poll: own leave requests
+    const attendanceInterval = setInterval(() => {
+      fetchUserAttendance();
+    }, 300000); // Heavy poll: personal attendance history (every 5 minutes instead of 10s)
+    return () => {
+      clearInterval(leaveInterval);
+      clearInterval(attendanceInterval);
+    };
+  }, [staffIdStr, fetchRecords, fetchUserAttendance, fetchAnnouncements, fetchRanking, fetchLeaveRequests]);
+
+  // Refresh local state after the offline queue is replayed by the service worker.
+  useEffect(() => {
+    const handleOfflineFlushed = () => {
+      if (staffIdStr) {
+        fetchRecords(staffIdStr);
+        fetchUserAttendance();
+      }
+    };
+    window.addEventListener('offline-queue-flushed', handleOfflineFlushed);
+    return () => window.removeEventListener('offline-queue-flushed', handleOfflineFlushed);
+  }, [staffIdStr, fetchRecords, fetchUserAttendance]);
 
   useEffect(() => {
     let timer: NodeJS.Timeout;
@@ -193,8 +236,8 @@ const MainApp: React.FC<MainAppProps> = ({ user, onLogout }) => {
   }, [clockStatus, workTimeRecords]);
 
   // Attendance & Smart Flow
-  const processAttendance = async (type: 'clock-in' | 'clock-out') => {
-    if (!user.staffId || isSubmitting) return;
+  const processAttendance = async (type: 'clock-in' | 'clock-out', notes?: string) => {
+    if (!staffIdStr || isSubmitting) return;
 
     setIsSubmitting(true);
     const toastId = toast.loading("Validasi Lokasi...");
@@ -217,12 +260,26 @@ const MainApp: React.FC<MainAppProps> = ({ user, onLogout }) => {
         }
 
         try {
-          await api.post('/api/records', { staffId: user.staffId, type });
+          await api.post('/api/records', { 
+            staffId: staffIdStr, 
+            type,
+            notes: notes || undefined,
+            location: {
+              latitude,
+              longitude,
+              distance: Math.round(distance)
+            }
+          });
           toast.update(toastId, { render: `${type === 'clock-in' ? 'Masuk' : 'Pulang'} berhasil!`, type: "success", isLoading: false, autoClose: 3000 });
           triggerSuccessFeedback();
-          fetchRecords(user.staffId!);
+          fetchRecords(staffIdStr);
         } catch (error: any) {
-          toast.update(toastId, { render: error.response?.data?.message || 'Terjadi kesalahan.', type: "error", isLoading: false, autoClose: 3000 });
+          if (error?.offlineQueued) {
+            toast.update(toastId, { render: "Anda sedang offline — absensi disimpan dan akan dikirim otomatis saat online.", type: "info", isLoading: false, autoClose: 4000 });
+            setClockStatus(type === 'clock-in' ? 'in' : 'finished');
+          } else {
+            toast.update(toastId, { render: error.response?.data?.message || 'Terjadi kesalahan.', type: "error", isLoading: false, autoClose: 3000 });
+          }
         } finally {
           setIsSubmitting(false);
         }
@@ -235,12 +292,18 @@ const MainApp: React.FC<MainAppProps> = ({ user, onLogout }) => {
     );
   };
 
-  const handleOtherStatus = (status: 'Sakit' | 'Izin') => {
-    if (!user.staffId) return;
+  const handleOtherStatus = (status: 'Sakit' | 'Izin', notes?: string) => {
+    if (!staffIdStr) return;
     const toastId = toast.loading("Mengirim laporan...");
-    api.post('/api/attendance', { staffId: user.staffId, name: user.name, status, date: new Date().toLocaleDateString('en-CA'), time: new Date().toTimeString().split(' ')[0] })
+    api.post('/api/attendance', { staffId: staffIdStr, name: user.name, status, date: new Date().toLocaleDateString('en-CA'), time: new Date().toTimeString().split(' ')[0], notes: notes || undefined })
     .then(() => { toast.update(toastId, { render: "Laporan terkirim!", type: "success", isLoading: false, autoClose: 3000 }); triggerSuccessFeedback(); fetchUserAttendance(); })
-    .catch(err => { toast.update(toastId, { render: "Gagal mengirim laporan.", type: "error", isLoading: false, autoClose: 3000 }); });
+    .catch(err => {
+      if (err?.offlineQueued) {
+        toast.update(toastId, { render: "Anda sedang offline — laporan disimpan dan akan dikirim otomatis saat online.", type: "info", isLoading: false, autoClose: 4000 });
+      } else {
+        toast.update(toastId, { render: "Gagal mengirim laporan.", type: "error", isLoading: false, autoClose: 3000 });
+      }
+    });
   };
 
   const todayInJakarta = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Jakarta' });
@@ -254,10 +317,57 @@ const MainApp: React.FC<MainAppProps> = ({ user, onLogout }) => {
       const d = new Date(r.date);
       return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
     });
+
     const hadir = monthlyRecords.length;
     const terlambat = monthlyRecords.filter(r => r.keteranganMasuk === 'Terlambat').length;
-    const percentage = monthlyRecords.length > 0 ? Math.round(((hadir - terlambat) / hadir) * 100) : 0;
-    return { hadir, terlambat, percentage };
+    const tepatWaktu = monthlyRecords.filter(r => ['Tepat Waktu', 'Datang Lebih Awal'].includes(r.keteranganMasuk)).length;
+    const pulangLebihAwal = monthlyRecords.filter(r => r.keteranganPulang === 'Pulang Lebih Awal').length;
+
+    // Parse total hours in minutes
+    let totalMinutes = 0;
+    monthlyRecords.forEach(r => {
+      if (r.totalHours) {
+        const parts = r.totalHours.match(/(\d+)\s*jam(?:\s*(\d+)\s*menit)?/i);
+        if (parts) {
+          const h = parseInt(parts[1], 10) || 0;
+          const m = parseInt(parts[2], 10) || 0;
+          totalMinutes += (h * 60) + m;
+        }
+      }
+    });
+
+    const totalHoursNum = Math.floor(totalMinutes / 60);
+    const totalRemainingMinutes = totalMinutes % 60;
+    const totalJamKerjaFormatted = totalMinutes > 0 ? `${totalHoursNum}j ${totalRemainingMinutes}m` : '0j';
+
+    const avgMinutesPerDay = hadir > 0 ? Math.round(totalMinutes / hadir) : 0;
+    const avgH = Math.floor(avgMinutesPerDay / 60);
+    const avgM = avgMinutesPerDay % 60;
+    const rataHarianFormatted = avgMinutesPerDay > 0 ? `${avgH}j ${avgM}m` : '0j';
+
+    const percentage = hadir > 0 ? Math.round(((hadir - terlambat) / hadir) * 100) : 100;
+
+    // Calculate current streak of attendance without late
+    const sortedDesc = [...workTimeRecords].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    let currentStreak = 0;
+    for (const r of sortedDesc) {
+      if (r.keteranganMasuk !== 'Terlambat' && r.clockInTime && r.clockInTime !== 'N/A') {
+        currentStreak++;
+      } else {
+        break;
+      }
+    }
+
+    return {
+      hadir,
+      terlambat,
+      tepatWaktu,
+      pulangLebihAwal,
+      totalJamKerjaFormatted,
+      rataHarianFormatted,
+      percentage,
+      streak: currentStreak
+    };
   }, [workTimeRecords]);
 
   if (isLoading) {
@@ -321,14 +431,14 @@ const MainApp: React.FC<MainAppProps> = ({ user, onLogout }) => {
         <div className="primary-actions">
           <button 
             className="main-action-btn btn-masuk-large"
-            onClick={() => processAttendance('clock-in')}
+            onClick={() => openEntryModal('clock-in')}
             disabled={clockStatus === 'in' || clockStatus === 'finished' || !!todaysAttendance || !!todaysLeave || isSubmitting}
           >
             <LogIn size={24} className="me-2" /> Absen Masuk
           </button>
           <button 
             className="main-action-btn btn-pulang-large"
-            onClick={() => processAttendance('clock-out')}
+            onClick={() => openEntryModal('clock-out')}
             disabled={clockStatus === 'out' || clockStatus === 'finished' || !!todaysLeave || isSubmitting}
           >
             <LogOutIcon size={24} className="me-2" /> Absen Pulang
@@ -375,40 +485,72 @@ const MainApp: React.FC<MainAppProps> = ({ user, onLogout }) => {
             <Card.Body className="p-4">
               <div className="d-flex justify-content-between align-items-center mb-3">
                 <h6 className="mb-0 font-weight-bold d-flex align-items-center">
-                  <Activity size={18} className="me-2 text-primary-green" /> Insight Kehadiran
+                  <Activity size={18} className="me-2 text-primary-green" /> Statistik Bulan Ini
                 </h6>
-                <span className="text-primary-green tiny font-weight-bold">BULAN INI</span>
+                {stats.streak > 0 && (
+                  <Badge bg="warning" text="dark" className="d-flex align-items-center gap-1 rounded-pill px-3 py-1 shadow-sm font-weight-bold">
+                    <Flame size={14} className="text-danger" /> {stats.streak} Hari Disiplin
+                  </Badge>
+                )}
               </div>
-              <Row className="g-3">
-                <Col xs={4}>
-                  <div className="analytic-item">
-                    <span className="label">HADIR</span>
-                    <span className="value">{stats.hadir}</span>
+
+              <Row className="g-2 mb-3">
+                <Col xs={6} sm={3}>
+                  <div className="analytic-item text-center p-2 bg-white rounded-12 shadow-xs">
+                    <span className="label text-muted tiny d-block">HADIR</span>
+                    <span className="value font-weight-bold text-dark">{stats.hadir} <small className="text-muted fw-normal" style={{ fontSize: '0.7rem' }}>hari</small></span>
                   </div>
                 </Col>
-                <Col xs={4}>
-                  <div className="analytic-item">
-                    <span className="label text-danger">TELAT</span>
-                    <span className="value text-danger">{stats.terlambat}</span>
+                <Col xs={6} sm={3}>
+                  <div className="analytic-item text-center p-2 bg-white rounded-12 shadow-xs">
+                    <span className="label text-danger tiny d-block">TERLAMBAT</span>
+                    <span className="value font-weight-bold text-danger">{stats.terlambat} <small className="text-muted fw-normal" style={{ fontSize: '0.7rem' }}>kali</small></span>
                   </div>
                 </Col>
-                <Col xs={4}>
-                  <div className="analytic-item">
-                    <span className="label text-success">SKOR</span>
-                    <span className="value text-success">{stats.percentage}%</span>
+                <Col xs={6} sm={3}>
+                  <div className="analytic-item text-center p-2 bg-white rounded-12 shadow-xs">
+                    <span className="label text-primary-green tiny d-block">TOTAL JAM</span>
+                    <span className="value font-weight-bold text-primary-green">{stats.totalJamKerjaFormatted}</span>
+                  </div>
+                </Col>
+                <Col xs={6} sm={3}>
+                  <div className="analytic-item text-center p-2 bg-white rounded-12 shadow-xs">
+                    <span className="label text-info tiny d-block">RATA-RATA</span>
+                    <span className="value font-weight-bold text-info">{stats.rataHarianFormatted}</span>
                   </div>
                 </Col>
               </Row>
+
+              <div className="discipline-progress pt-1">
+                <div className="d-flex justify-content-between align-items-center mb-1">
+                  <span className="tiny text-muted font-weight-bold d-flex align-items-center gap-1">
+                    <TrendingUp size={12} className="text-primary-green" /> Skor Kedisiplinan
+                  </span>
+                  <span className={`tiny font-weight-bold ${stats.percentage >= 85 ? 'text-success' : stats.percentage >= 70 ? 'text-warning' : 'text-danger'}`}>
+                    {stats.percentage}%
+                  </span>
+                </div>
+                <ProgressBar 
+                  now={stats.percentage} 
+                  variant={stats.percentage >= 85 ? 'success' : stats.percentage >= 70 ? 'warning' : 'danger'} 
+                  className="rounded-pill mb-2" 
+                  style={{ height: '6px' }} 
+                />
+                <div className="tiny text-muted d-flex align-items-center gap-1">
+                  <Sparkles size={12} className="text-warning flex-shrink-0" />
+                  <span>{stats.percentage >= 90 ? 'Luar biasa! Pertahankan kedisiplinan prima Anda.' : stats.percentage >= 75 ? 'Bagus! Terus jaga ketepatan waktu hadir.' : 'Mari tingkatkan ketepatan waktu absen datang.'}</span>
+                </div>
+              </div>
             </Card.Body>
           </Card>
 
           {/* Quick Actions */}
           <div className="quick-actions-grid">
-            <button className="q-btn" onClick={() => handleOtherStatus('Sakit')} disabled={clockStatus === 'finished' || !!todaysAttendance || !!todaysLeave}>
+            <button className="q-btn" onClick={() => openEntryModal('Sakit')} disabled={clockStatus === 'finished' || !!todaysAttendance || !!todaysLeave}>
               <Stethoscope size={20} className="text-warning" />
               <span>Sakit</span>
             </button>
-            <button className="q-btn" onClick={() => handleOtherStatus('Izin')} disabled={clockStatus === 'finished' || !!todaysAttendance || !!todaysLeave}>
+            <button className="q-btn" onClick={() => openEntryModal('Izin')} disabled={clockStatus === 'finished' || !!todaysAttendance || !!todaysLeave}>
               <CalendarClock size={20} className="text-info" />
               <span>Izin</span>
             </button>
@@ -437,8 +579,15 @@ const MainApp: React.FC<MainAppProps> = ({ user, onLogout }) => {
                 onClick={() => handleShowAnnouncement(ann)}
               >
                 <Card.Body className="p-3">
-                  <div className="d-flex justify-content-between align-items-start mb-1">
-                    <h6 className="ann-title-text mb-0 text-primary-green">{ann.title}</h6>
+                  <div className="d-flex justify-content-between align-items-start mb-1 flex-wrap gap-1">
+                    <div className="d-flex align-items-center gap-2">
+                      <h6 className="ann-title-text mb-0 text-primary-green">{ann.title}</h6>
+                      {ann.targetRole && ann.targetRole !== 'all' && (
+                        <Badge bg="info" text="dark" className="tiny fw-normal rounded-pill">
+                          Khusus
+                        </Badge>
+                      )}
+                    </div>
                     <span className="tiny text-muted">{new Date(ann.createdAt).toLocaleDateString('id-ID')}</span>
                   </div>
                   <p className="ann-content-preview small text-muted mb-0">{ann.content}</p>
@@ -465,11 +614,20 @@ const MainApp: React.FC<MainAppProps> = ({ user, onLogout }) => {
           {selectedAnnouncement && (
             <div className="ann-detail">
               <h5 className="font-weight-bold mb-1">{selectedAnnouncement.title}</h5>
-              <div className="d-flex align-items-center gap-2 mb-3">
+              <div className="d-flex align-items-center gap-2 mb-3 flex-wrap">
                 <Badge bg="light" className="text-muted tiny">
                   {new Date(selectedAnnouncement.createdAt).toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}
                 </Badge>
                 <Badge bg="light" className="text-muted tiny">Oleh Admin</Badge>
+                {selectedAnnouncement.targetRole && selectedAnnouncement.targetRole !== 'all' ? (
+                  <Badge bg="info" text="dark" className="tiny rounded-pill">
+                    Penerima: {selectedAnnouncement.targetRole.toUpperCase()}
+                  </Badge>
+                ) : (
+                  <Badge bg="secondary" className="tiny rounded-pill">
+                    Penerima: Semua
+                  </Badge>
+                )}
               </div>
               <div className="ann-full-content text-muted small" style={{ whiteSpace: 'pre-wrap', lineHeight: '1.6' }}>
                 {selectedAnnouncement.content}
@@ -498,8 +656,52 @@ const MainApp: React.FC<MainAppProps> = ({ user, onLogout }) => {
       {/* PWA: Offline / Location Notice */}
       <div className="mt-4 p-3 bg-white border rounded-lg d-flex align-items-center gap-3">
         <AlertCircle size={20} className="text-warning" />
-        <p className="small mb-0 text-muted">Aplikasi ini mendukung mode offline. Data akan disinkronkan saat kembali online.</p>
+        <p className="small mb-0 text-muted">Aplikasi ini mendukung mode offline. Absen masuk/pulang yang dibuat tanpa koneksi akan dikirim otomatis saat kembali online.</p>
       </div>
+
+      {/* Entry Modal: clock-in/out notes / Sakit-Izin reason */}
+      <Modal show={showEntryModal} onHide={() => setShowEntryModal(false)} centered>
+        <Modal.Header closeButton className="border-0 pb-0">
+          <Modal.Title className="h5 fw-bold d-flex align-items-center gap-2">
+            {entryAction === 'clock-in' ? <LogIn size={20} className="text-primary-green" /> : entryAction === 'clock-out' ? <LogOutIcon size={20} className="text-warning" /> : entryAction === 'Sakit' ? <Stethoscope size={20} className="text-warning" /> : <CalendarClock size={20} className="text-info" />}
+            {entryAction === 'clock-in' ? 'Konfirmasi Absen Masuk' : entryAction === 'clock-out' ? 'Konfirmasi Absen Pulang' : `Laporan ${entryAction}`}
+          </Modal.Title>
+        </Modal.Header>
+        <Modal.Body className="pt-3">
+          <p className="small text-muted mb-3">
+            {entryAction === 'clock-in'
+              ? 'Tambahkan catatan (opsional) seperti keterangan keterlambatan atau keperluan luar sebelum validasi lokasi.'
+              : entryAction === 'clock-out'
+              ? 'Tambahkan catatan (opsional) seperti keterangan pulang lebih awal sebelum validasi lokasi.'
+              : `Jelaskan alasan ${entryAction} Anda. Laporan ini akan direview oleh admin.`}
+          </p>
+          <Form.Group>
+            <Form.Control
+              as="textarea"
+              rows={3}
+              maxLength={500}
+              value={entryNotes}
+              onChange={(e) => setEntryNotes(e.target.value)}
+              placeholder={entryAction === 'clock-in' ? 'Contoh: Keterlambatan karena hujan deras...' : entryAction === 'clock-out' ? 'Contoh: Pulang lebih awal karena ada keperluan mendesak...' : 'Contoh: Periksa ke dokter, anak sakit, ada kepentingan keluarga...'}
+              className="bg-light border-0 rounded-12"
+            />
+            <Form.Text className="text-muted text-end d-block mt-1">{entryNotes.length}/500</Form.Text>
+          </Form.Group>
+        </Modal.Body>
+        <Modal.Footer className="border-0 pt-0 d-flex justify-content-center pb-4">
+          <Button variant="light" className="rounded-pill px-4" onClick={() => setShowEntryModal(false)}>
+            Batal
+          </Button>
+          <Button
+            variant={entryAction === 'clock-in' ? 'success' : entryAction === 'clock-out' ? 'warning' : 'primary'}
+            className="rounded-pill px-4 fw-bold"
+            onClick={handleEntryModalConfirm}
+            disabled={isSubmitting}
+          >
+            {entryAction === 'clock-in' || entryAction === 'clock-out' ? 'Konfirmasi & Absen' : `Kirim Laporan ${entryAction}`}
+          </Button>
+        </Modal.Footer>
+      </Modal>
 
       <div id="full-history" className="history-section mt-5 border-top pt-4">
         <PersonalAttendanceReport attendance={attendance} workTimeRecords={workTimeRecords} user={user} />

@@ -74,3 +74,35 @@
 .history-mobile-card:active {
   transform: scale(0.98);
 }
+
+.server-analytics-banner {
+  border-left: 4px solid var(--primary-green) !important;
+}
+
+.stat-chip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--body-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+}
+
+.stat-chip-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+
+.stat-chip-value {
+  font-size: 1.05rem;
+  font-weight: 800;
+  color: var(--text);
+}
+
+.stat-chip-value.text-purple {
+  color: #8b5cf6;
+}

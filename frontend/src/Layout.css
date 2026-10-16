@@ -1,10 +1,32 @@
+/* Layout Component Styles */
+
 .layout-wrapper {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
   background-color: var(--background-color);
+  font-family: 'Plus Jakarta Sans', sans-serif;
 }
 
 .main-content {
   flex: 1;
+  width: 100%;
+  position: relative;
+  z-index: 1;
+}
+
+/* Smooth page transition container */
+.main-content > * {
+  animation: pageFadeIn 0.35s ease-out;
+}
+
+@keyframes pageFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }

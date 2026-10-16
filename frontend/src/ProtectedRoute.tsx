@@ -4,7 +4,7 @@ import { User } from './types';
 
 interface ProtectedRouteProps {
   user: User | null;
-  allowedRoles?: string[];
+  allowedRoles?: readonly string[];
   children: React.ReactNode;
 }
 

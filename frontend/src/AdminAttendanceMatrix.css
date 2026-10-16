@@ -1,0 +1,133 @@
+.admin-matrix .matrix-scroll {
+  max-height: 60vh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.matrix-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  white-space: nowrap;
+}
+
+.matrix-table th,
+.matrix-table td {
+  border-bottom: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  padding: 6px 8px;
+}
+
+.matrix-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--card-bg);
+  box-shadow: 0 1px 0 var(--border);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.matrix-sticky-first,
+.matrix-sticky-second {
+  position: sticky;
+  left: 0;
+  z-index: 6;
+  background: var(--card-bg);
+  min-width: 140px;
+}
+
+.matrix-sticky-second {
+  left: 140px;
+  min-width: 140px;
+}
+
+.matrix-table tbody .matrix-sticky-first,
+.matrix-table tbody .matrix-sticky-second {
+  box-shadow: 1px 0 0 var(--border);
+}
+
+.matrix-day-header {
+  min-width: 40px;
+}
+
+.matrix-day-num {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.matrix-day-short {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+}
+
+.matrix-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  font-size: 0.75rem;
+  font-weight: 800;
+  color: #fff;
+}
+
+.matrix-empty {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.matrix-hadir {
+  background-color: #10b981;
+}
+
+.matrix-sakit {
+  background-color: #f59e0b;
+}
+
+.matrix-izin {
+  background-color: #3b82f6;
+}
+
+.matrix-alpha {
+  background-color: #ef4444;
+}
+
+.matrix-cuti {
+  background-color: #8b5cf6;
+}
+
+.matrix-legend-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 4px;
+  display: inline-block;
+}
+
+.matrix-legend-dot.matrix-hadir {
+  background: #10b981;
+}
+
+.matrix-legend-dot.matrix-sakit {
+  background: #f59e0b;
+}
+
+.matrix-legend-dot.matrix-izin {
+  background: #3b82f6;
+}
+
+.matrix-legend-dot.matrix-alpha {
+  background: #ef4444;
+}
+
+.matrix-legend-dot.matrix-cuti {
+  background: #8b5cf6;
+}
+
+.matrix-table .text-purple {
+  color: #8b5cf6 !important;
+}

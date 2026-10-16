@@ -3,6 +3,7 @@ import api from './api';
 import { toast } from 'react-toastify';
 import { Button, Form, Table, Container, Row, Col, Card, Spinner, Badge, Modal } from 'react-bootstrap';
 import { Calendar, RefreshCw, Trash2, Plus, Info, Globe } from 'lucide-react';
+import { ROLE_OPTIONS } from './constants/roles';
 
 interface Holiday {
   _id: string;
@@ -26,13 +27,7 @@ const HolidaySettings: React.FC = () => {
 
   const ROLES = [
     { value: 'all', label: 'Semua Role' },
-    { value: 'staff', label: 'Staff' },
-    { value: 'petugas kebersihan', label: 'Petugas Kebersihan' },
-    { value: 'guru ra', label: 'Guru RA' },
-    { value: 'guru mi akhwat', label: 'Guru MI Akhwat' },
-    { value: 'guru mi ikhwan', label: 'Guru MI Ikhwan' },
-    { value: 'guru tahfidz fase a', label: 'Guru Tahfidz Fase A' },
-    { value: 'guru tahfidz fase b & c', label: 'Guru Tahfidz Fase B & C' },
+    ...ROLE_OPTIONS.filter(r => r.value !== 'admin'),
   ];
 
   const fetchHolidays = async (currentYear: number) => {

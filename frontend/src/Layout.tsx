@@ -11,12 +11,14 @@ interface LayoutProps {
   children?: React.ReactNode;
   onLogout: () => void;
   user: User | null;
+  darkMode?: boolean;
+  toggleDarkMode?: () => void;
 }
 
-const Layout: React.FC<LayoutProps> = ({ children, onLogout, user }) => {
+const Layout: React.FC<LayoutProps> = ({ children, onLogout, user, darkMode, toggleDarkMode }) => {
   return (
     <div className="layout-wrapper">
-      <Navbar onLogout={onLogout} user={user} />
+      <Navbar onLogout={onLogout} user={user} darkMode={darkMode} toggleDarkMode={toggleDarkMode} />
       <main className="main-content animate-fade-in">
         {children || <Outlet />}
       </main>

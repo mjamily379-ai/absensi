@@ -1,24 +1,26 @@
 import React, { useState, useEffect } from 'react';
 import { toast } from 'react-toastify';
-import { Button, Form, Container, Row, Col, Card, Spinner, InputGroup } from 'react-bootstrap';
+import { Button, Form, Container, Row, Col, Card, Spinner } from 'react-bootstrap';
 import api from './api';
 import type { WorkDay } from './types';
-import { Settings, Clock, Moon, Save, UserCheck, Calendar } from 'lucide-react';
+import { ALL_ROLES, DAYS_ID_MONDAY_FIRST } from './constants/roles';
+import { Settings, Clock, Moon, Save, UserCheck, CopyCheck } from 'lucide-react';
 
 const WorkDaySettings: React.FC = () => {
   const [workDays, setWorkDays] = useState<WorkDay[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [isApplyingAll, setIsApplyingAll] = useState<boolean>(false);
   const [selectedRole, setSelectedRole] = useState<string>('staff');
 
-  const daysOfWeek = ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu', 'Minggu'];
-  const roles = ['admin', 'staff', 'petugas kebersihan', 'guru ra', 'guru mi akhwat', 'guru mi ikhwan', 'guru tahfidz fase a', 'guru tahfidz fase b & c'];
+  const daysOfWeek = [...DAYS_ID_MONDAY_FIRST];
+  const roles = ALL_ROLES;
 
   useEffect(() => {
     const fetchWorkDays = async () => {
       setIsLoading(true);
       try {
-        const response = await api.get(`/api/workday?role=${selectedRole}`);
+        const response = await api.get('/api/workday', { params: { role: selectedRole } });
         if (response.data && response.data.length > 0) {
           const sortedWorkDays = daysOfWeek.map(day => {
             const foundDay = response.data.find((d: WorkDay) => d.day === day);
@@ -88,6 +90,21 @@ const WorkDaySettings: React.FC = () => {
       console.error('Error saving work days:', error);
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  const handleApplyToAll = async () => {
+    if (workDays.length === 0) return;
+    setIsApplyingAll(true);
+    try {
+      const roles = ALL_ROLES.filter(r => r !== 'admin');
+      await api.post('/api/workday/bulk', { roles, workDays });
+      toast.success(`Pengaturan diterapkan ke semua role (${roles.length}) kecuali admin.`);
+    } catch (error: any) {
+      toast.error(error.response?.data?.message || 'Gagal menerapkan pengaturan ke semua role.');
+      console.error('Error applying work days to all roles:', error);
+    } finally {
+      setIsApplyingAll(false);
     }
   };
 
@@ -222,12 +239,26 @@ const WorkDaySettings: React.FC = () => {
             ))}
           </Row>
           
-          <div className="mt-4 text-end">
+          <div className="mt-4 d-flex justify-content-end gap-2 flex-wrap">
+            <Button 
+              variant="outline-primary" 
+              size="lg"
+              onClick={handleApplyToAll} 
+              disabled={isSaving || isApplyingAll || workDays.length === 0}
+              className="px-4 py-3 fw-bold shadow-sm d-inline-flex align-items-center gap-2"
+              title="Terapkan jadwal yang sama ke semua role (kecuali admin)"
+            >
+              {isApplyingAll ? (
+                <><Spinner as="span" animation="border" size="sm" /> Menerapkan...</>
+              ) : (
+                <><CopyCheck size={20} /> Terapkan ke Semua Role</>
+              )}
+            </Button>
             <Button 
               variant="primary" 
               size="lg"
               onClick={handleSaveSettings} 
-              disabled={isSaving}
+              disabled={isSaving || isApplyingAll}
               className="px-5 py-3 fw-bold shadow-sm d-inline-flex align-items-center gap-2"
             >
               {isSaving ? (

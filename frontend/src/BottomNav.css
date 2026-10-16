@@ -41,6 +41,19 @@
   transform: translateY(-2px);
 }
 
+.install-nav-btn {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--primary-green);
+  animation: install-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes install-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+}
+
 /* For larger phones, maybe add some safe area padding */
 @supports (padding: env(safe-area-inset-bottom)) {
   .bottom-nav {

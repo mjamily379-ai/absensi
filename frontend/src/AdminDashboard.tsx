@@ -1,15 +1,19 @@
-import React, { useState, useEffect, useRef } from 'react';
-import api from './api';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import api, { fetchAttachmentBlobUrl } from './api';
 import Select from 'react-select';
 import { AdminSummary } from './AdminSummary';
 import { AdminCharts, AdminChartsRef } from './AdminCharts';
-import { Modal, Button, Form, Badge, Tooltip, OverlayTrigger, Tabs, Tab, Row, Col, Card, InputGroup } from 'react-bootstrap';
-import { Download, Search, PlusCircle, Edit2, Trash2, Calendar, FileText, Settings, History as HistoryIcon, UserPlus, Info, CheckCircle, Clock, Activity, Camera } from 'lucide-react';
+import AdminAnalytics from './AdminAnalytics';
+import AdminAttendanceMatrix from './AdminAttendanceMatrix';
+import { Modal, Button, Form, Badge, Tooltip, OverlayTrigger, Tabs, Tab, Row, Col, Card, InputGroup, Spinner } from 'react-bootstrap';
+import { Download, Search, PlusCircle, Edit2, Trash2, Calendar, FileText, Settings, History as HistoryIcon, UserPlus, CheckCircle, Clock, Activity, Camera, Megaphone, MapPin, Bell, FileSpreadsheet } from 'lucide-react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { toast } from 'react-toastify';
 import HolidaySettings from './HolidaySettings';
 import WorkDaySettings from './WorkDaySettings';
 import RamadanSettings from './RamadanSettings';
-import type { Attendance, Staff, User, EditedBy, ClockInOutRecord, WorkTimeRecord, LeaveRequest, RecordWithStaff, Holiday, RamadanPeriod } from './types'; // Import RecordWithStaff
+import type { Attendance, Staff, User, EditedBy, WorkTimeRecord, LeaveRequest, RecordWithStaff, Holiday, RamadanPeriod, CorrectionRequest } from './types';
+import { ROLE_LABELS, ROLE_OPTIONS, MONTHS_ID, DAYS_ID_SUNDAY_FIRST } from './constants/roles';
  // Import Attendance
 
 
@@ -45,7 +49,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
 
   // Delete modal states
   const [showDeleteModal, setShowDeleteModal] = useState(false);
-  const [recordToDelete, setRecordToDelete] = useState<string | null>(null);
+  const [recordToDelete, setRecordToDelete] = useState<{ _id?: string; staffId: string; date: string } | null>(null);
   const [showDeleteRecordModal, setShowDeleteRecordModal] = useState(false);
   const [recordToDeleteId, setRecordToDeleteId] = useState<string | null>(null);
   const [rawRecordsDate, setRawRecordsDate] = useState(new Date());
@@ -53,9 +57,13 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
   const [showPhotoModal, setShowPhotoModal] = useState(false);
   const [currentPhoto, setCurrentPhoto] = useState<string | null>(null);
   const [currentPhotoUser, setCurrentPhotoUser] = useState<string | null>(null);
+  const [isPhotoLoading, setIsPhotoLoading] = useState(false);
+  const photoBlobRef = useRef<string>('');
+  const photoAbortRef = useRef<AbortController | null>(null);
   
   // Data states
   const [allAttendance, setAllAttendance] = useState<Attendance[]>([]);
+  const [allRecords, setAllRecords] = useState<RecordWithStaff[]>([]);
   const [rawRecords, setRawRecords] = useState<RecordWithStaff[]>([]);
   const [todaysRecords, setTodaysRecords] = useState<RecordWithStaff[]>([]);
   const [workDaySettings, setWorkDaySettings] = useState<any[]>([]);
@@ -74,11 +82,128 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
   const [recordForClockOut, setRecordForClockOut] = useState<RecordWithStaff | null>(null);
   const [addClockOutFormData, setAddClockOutFormData] = useState({ clockOutTime: '', notes: '' });
 
+  // Bulk Export Modal State
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportRole, setExportRole] = useState('all');
+  const [exportMonth, setExportMonth] = useState(new Date().getMonth());
+  const [exportYear, setExportYear] = useState(new Date().getFullYear());
+  const [exportIncludeIndividual, setExportIncludeIndividual] = useState(true);
+  const [isExporting, setIsExporting] = useState(false);
+
+  // Correction Requests State
+  const [correctionRequests, setCorrectionRequests] = useState<CorrectionRequest[]>([]);
+  const [selectedCorrToReview, setSelectedCorrToReview] = useState<CorrectionRequest | null>(null);
+  const [corrReviewAction, setCorrReviewAction] = useState<'approved' | 'rejected'>('approved');
+  const [corrAdminNotes, setCorrAdminNotes] = useState('');
+  const [showCorrReviewModal, setShowCorrReviewModal] = useState(false);
+  const [isCorrReviewing, setIsCorrReviewing] = useState(false);
+
+  // KPI drill-down (from AdminSummary clickable cards via ?kpi=in|late|notin)
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeKpi = searchParams.get('kpi');
+
+  const kpiStaffList = useMemo(() => {
+    const dateString = new Date().toLocaleDateString('en-CA');
+    const dayName = DAYS_ID_SUNDAY_FIRST[new Date().getDay()] || '';
+    const isRamadan = (ramadanPeriods || []).some(p => dateString >= p.startDate && dateString <= p.endDate);
+
+    const clockInTimes = new Map<string, Date>();
+    (todaysRecords || []).forEach(r => {
+      if (r.type === 'clock-in') {
+        const sid = typeof r.staffId === 'object' && r.staffId !== null ? r.staffId._id : r.staffId;
+        clockInTimes.set(sid, new Date(r.timestamp));
+      }
+    });
+
+    const otherAttendanceIds = new Set<string>();
+    (allAttendance || [])
+      .filter(a => a.date === dateString && (a.status === 'Sakit' || a.status === 'Izin' || a.status === 'Cuti'))
+      .forEach(a => {
+        const sid = typeof a.staffId === 'object' && a.staffId !== null ? a.staffId._id : a.staffId;
+        if (sid) otherAttendanceIds.add(sid);
+      });
+
+    const inList: { id: string; name: string }[] = [];
+    const lateList: { id: string; name: string }[] = [];
+    const notinList: { id: string; name: string }[] = [];
+
+    (staff || []).forEach(s => {
+      const user = users.find(u => {
+        const sid = typeof u.staffId === 'object' && u.staffId !== null ? u.staffId._id : u.staffId;
+        return sid === s._id;
+      });
+      if (!user || user.role === 'admin') return;
+      const userStaffId = typeof user.staffId === 'object' && user.staffId !== null ? user.staffId._id : user.staffId;
+      if (!userStaffId) return;
+      const wd = (workDaySettings || []).find(ws => ws.role === user.role && ws.day === dayName);
+      if (!wd || !wd.isWorkDay) return;
+
+      const clockedIn = clockInTimes.has(userStaffId);
+      if (clockedIn) {
+        inList.push({ id: userStaffId, name: user.name });
+        const startStr = (isRamadan && wd.ramadanStartTime) ? wd.ramadanStartTime : wd.startTime;
+        const [sh, sm] = (startStr || '00:00').split(':').map(Number);
+        const t = clockInTimes.get(userStaffId)!;
+        if (t.getHours() > sh || (t.getHours() === sh && t.getMinutes() > sm)) {
+          lateList.push({ id: userStaffId, name: user.name });
+        }
+      } else if (!otherAttendanceIds.has(userStaffId)) {
+        notinList.push({ id: userStaffId, name: user.name });
+      }
+    });
+
+    return { in: inList, late: lateList, notin: notinList };
+  }, [users, todaysRecords, allAttendance, staff, workDaySettings, ramadanPeriods]);
+
+  useEffect(() => {
+    // Auto-select the first staff of the active KPI only when the current
+    // selection is no longer part of that list (initial load, KPI switch, or a
+    // refresh moved the staff to another list). A manual selection is preserved
+    // across data refreshes instead of being silently flipped.
+    const activeList = kpiStaffList[activeKpi as keyof typeof kpiStaffList] || [];
+    if (!activeList.some(s => s.id === selectedStaffId) && activeList.length) {
+      setSelectedStaffId(activeList[0].id);
+    }
+  }, [activeKpi, kpiStaffList, selectedStaffId]);
+
+  const kpiTitles: Record<string, string> = { in: 'Hadir Saat Ini', late: 'Terlambat', notin: 'Belum Absen' };
 
   // Helper Functions
   const getLoggedInUser = () => {
     const user = localStorage.getItem('user');
     return user ? JSON.parse(user) : null;
+  };
+
+  const fetchCorrectionRequests = () => {
+    api.get('/api/correction-requests')
+      .then(res => setCorrectionRequests(Array.isArray(res.data) ? res.data : []))
+      .catch(err => console.error('Error fetching correction requests:', err));
+  };
+
+  const downloadBlob = (blob: Blob, filename: string) => {
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', filename);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(url);
+  };
+
+  const handleCorrExport = async (format: 'xlsx' | 'csv') => {
+    try {
+      const params = new URLSearchParams({ format });
+      const response = await api.get(`/api/export-corrections?${params.toString()}`, { responseType: 'blob' });
+      const disposition = String(response.headers?.['content-disposition'] || '');
+      const match = disposition.match(/filename="?([^"]+)"?/);
+      const filename = match?.[1] || `Laporan_Koreksi_Absensi.${format === 'xlsx' ? 'xlsx' : 'csv'}`;
+      downloadBlob(response.data as Blob, filename);
+      toast.success('Laporan koreksi berhasil diunduh!');
+    } catch (err) {
+      console.error('Error exporting corrections:', err);
+      toast.error('Gagal mengekspor laporan koreksi.');
+    }
   };
 
   const fetchTodaysRecords = () => {
@@ -95,39 +220,54 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
   };
 
 
-  const getDatesBetween = (startDate: Date, endDate: Date): string[] => {
-    const dates: string[] = [];
-    let currentDate = new Date(startDate);
-    while (currentDate <= endDate) {
-      dates.push(currentDate.toLocaleDateString('en-CA'));
-      currentDate.setDate(currentDate.getDate() + 1);
+  const extractYear = (value: string | Date | undefined | null): number | undefined => {
+    if (value == null || value === '') return undefined;
+    if (typeof value === 'string') {
+      const match = value.match(/^(\d{4})/);
+      if (match) return parseInt(match[1], 10);
     }
-    return dates;
+    const year = new Date(value).getFullYear();
+    return Number.isFinite(year) ? year : undefined;
   };
 
-  const getWorkingDaysMap = (workDaySettings: any[]) => {
-    const map = new Map();
-    workDaySettings.forEach(setting => {
-      if (!map.has(setting.role)) {
-        map.set(setting.role, new Map());
+  // The server returns already-computed daily status per staff (matrix),
+  // so we no longer run an O(staff x 365) Alpha generation loop in the browser.
+  const STATUS_MAP: Record<string, Attendance['status']> = {
+    H: 'Hadir', S: 'Sakit', I: 'Izin', C: 'Cuti', A: 'Alpha',
+  };
+
+  const flattenMatrix = (rows: any[]): Attendance[] => {
+    const result: Attendance[] = [];
+    for (const row of rows) {
+      if (!row.days) continue;
+      for (const [date, cell] of Object.entries(row.days)) {
+        const entry = cell as { ch?: string; id?: string } | string;
+        const ch = typeof entry === 'string' ? entry : entry.ch;
+        if (!ch) continue;
+        const id = typeof entry === 'object' && entry.id ? entry.id : `${row.staffId}-${date}-${ch}`;
+        result.push({
+          _id: id,
+          staffId: row.staffId,
+          name: row.name,
+          status: STATUS_MAP[ch] || 'Hadir',
+          date,
+          time: ch === 'A' ? '00:00' : 'N/A',
+        });
       }
-      map.get(setting.role).set(setting.day, setting.isWorkDay);
-    });
-    return map;
+    }
+    return result;
   };
 
-  const fetchAllAttendance = async () => {
+  const fetchBaseData = async () => {
     try {
       const [
-        attendanceResponse,
         staffResponse,
         usersResponse,
         workDaySettingsResponse,
         holidaysResponse,
-        allRecordsResponse, // Fetch all raw records
+        allRecordsResponse,
         ramadanResponse,
       ] = await Promise.all([
-        api.get('/api/attendance'),
         api.get('/api/staff'),
         api.get('/api/users'),
         api.get('/api/workday/all'),
@@ -136,88 +276,50 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
         api.get('/api/ramadan'),
       ]);
 
-      const existingAttendance: Attendance[] = attendanceResponse.data;
-      const allStaff: Staff[] = staffResponse.data;
-      const allUsers: User[] = usersResponse.data;
-      const workDaySettingsData: any[] = workDaySettingsResponse.data;
-      const holidaysData: Holiday[] = holidaysResponse.data;
-      const allRecords: RecordWithStaff[] = allRecordsResponse.data;
-      const ramadanData: RamadanPeriod[] = ramadanResponse.data;
-
-      // Set states that other components rely on
-      setStaff(allStaff);
-      setUsers(allUsers);
-      setWorkDaySettings(workDaySettingsData);
-      setHolidays(holidaysData);
-      setRamadanPeriods(ramadanData);
-
-      const workingDaysMap = getWorkingDaysMap(workDaySettingsData);
-
-      const processedAttendance: Attendance[] = [...existingAttendance];
-
-      // Define date range for checking (e.g., last year until today)
-      const endDate = new Date();
-      const startDate = new Date();
-      startDate.setFullYear(endDate.getFullYear() - 1); // Check for the last year
-
-      const datesToCheck = getDatesBetween(startDate, endDate);
-
-      for (const staffMember of allStaff) {
-        // Exclude admin staff from general attendance calculation
-        const user = allUsers.find(u => u.staffId === staffMember._id);
-        if (!user || user.role === 'admin') {
-          continue;
-        }
-
-        const userRole = user.role;
-        const userHolidaySet = new Set(holidaysData
-          .filter(h => h.role === 'all' || h.role === userRole)
-          .map(h => new Date(h.date).toLocaleDateString('en-CA'))
-        );
-
-        for (const dateString of datesToCheck) {
-          const currentDate = new Date(dateString);
-          const dayName = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'][currentDate.getDay()];
-
-          // Check if it's a workday for this user's role
-          const isWorkDay = workingDaysMap.has(userRole) && workingDaysMap.get(userRole).get(dayName);
-          const isHoliday = userHolidaySet.has(dateString);
-
-          if (isWorkDay && !isHoliday) {
-            // Check for existing attendance (Sakit, Izin, Cuti)
-            const hasExistingAttendance = existingAttendance.some(
-              a => a.staffId === staffMember._id && a.date === dateString && a.status !== 'Hadir'
-            );
-
-            // Check for existing clock-in/out records
-            const hasClockInOrOut = allRecords.some(
-              r => (typeof r.staffId === 'object' ? r.staffId._id : r.staffId) === staffMember._id && new Date(r.timestamp).toLocaleDateString('en-CA') === dateString
-            );
-
-            // If no existing attendance record and no clock-in/out, then it's 'Alpha'
-            if (!hasExistingAttendance && !hasClockInOrOut) {
-              processedAttendance.push({
-                _id: `${staffMember._id}-${dateString}-alpha`, // Unique ID for generated Alpha
-                staffId: staffMember._id,
-                name: staffMember.name,
-                status: 'Alpha',
-                date: dateString,
-                time: '00:00', // Default time
-              });
-            }
-          }
-        }
-      }
-      setAllAttendance(processedAttendance);
+      setStaff(staffResponse.data);
+      setUsers(usersResponse.data);
+      setWorkDaySettings(workDaySettingsResponse.data);
+      setHolidays(holidaysResponse.data);
+      setAllRecords(allRecordsResponse.data);
+      setRamadanPeriods(ramadanResponse.data);
     } catch (error) {
-      console.error("Error fetching all attendance data:", error);
+      console.error("Error fetching base data:", error);
     }
   };
 
+  const fetchAllAttendance = async (year: number) => {
+    try {
+      const response = await api.get(`/api/attendance/matrix?year=${year}`);
+      const rows = Array.isArray(response.data) ? response.data : response.data?.data;
+      setAllAttendance(flattenMatrix(Array.isArray(rows) ? rows : []));
+    } catch (error) {
+      console.error("Error fetching attendance matrix:", error);
+    }
+  };
+
+  const availableYears = useMemo(() => {
+    const years = new Set<number>();
+    years.add(new Date().getFullYear());
+    allAttendance.forEach(a => {
+      const year = extractYear(a.date);
+      if (year) years.add(year);
+    });
+    allRecords.forEach(r => {
+      const year = extractYear(r.timestamp);
+      if (year) years.add(year);
+    });
+    workTimeRecords.forEach(w => {
+      const year = extractYear(w.date);
+      if (year) years.add(year);
+    });
+    return Array.from(years).sort((a, b) => a - b);
+  }, [allAttendance, allRecords, workTimeRecords]);
+
   // useEffect Hooks
   useEffect(() => {
-    fetchAllAttendance();
+    fetchBaseData();
     fetchTodaysRecords();
+    fetchCorrectionRequests();
 
     // Fetch pending leave requests
     api.get('/api/leave-requests')
@@ -229,19 +331,38 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
         .catch(error => console.error("Error fetching leave requests:", error));
   }, []); // Empty dependency array means it runs once on mount
 
+  // Server-side attendance matrix follows the selected year (replaces the old client loop)
+  useEffect(() => {
+    fetchAllAttendance(selectedYear);
+  }, [selectedYear]);
+
   useEffect(() => {
     fetchRawRecords(rawRecordsDate);
   }, [rawRecordsDate]);
 
+  const fetchSelectedStaffWorkTime = (staffId: string) => {
+    return api.get(`/api/records/${staffId}`)
+      .then((response) => {
+        setWorkTimeRecords(Array.isArray(response.data) ? response.data : []);
+      })
+      .catch((err) => {
+        console.error('Error fetching work time records:', err);
+        setWorkTimeRecords([]);
+      });
+  };
+
   useEffect(() => {
     if (selectedStaffId) {
-      // Add a simple check for ObjectId format (24 hex characters)
       const isValidObjectId = /^[0-9a-fA-F]{24}$/.test(selectedStaffId);
       if (isValidObjectId) {
-        api.get(`/api/records/${selectedStaffId}`).then((response) => {
-          setWorkTimeRecords(response.data);
+        fetchSelectedStaffWorkTime(selectedStaffId);
+
+        const filteredAttendance = allAttendance.filter((record: Attendance) => {
+          const recStaffId = typeof (record as any).staffId === 'object' && (record as any).staffId !== null
+            ? (record as any).staffId._id
+            : (record as any).staffId;
+          return recStaffId === selectedStaffId;
         });
-        const filteredAttendance = allAttendance.filter((record: Attendance) => record.staffId === selectedStaffId);
         setAttendances(filteredAttendance);
       } else {
         console.warn('Invalid selectedStaffId:', selectedStaffId, 'preventing API call.');
@@ -274,6 +395,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
             document.body.appendChild(link);
             link.click();
             link.remove();
+            window.URL.revokeObjectURL(url);
         } catch (error) {
             console.error('Error exporting personal excel:', error);
             toast.error('Gagal mengekspor laporan staff.');
@@ -281,29 +403,79 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
         return;
     }
 
-    if (!chartsRef.current) {
-      toast.error('Komponen grafik tidak tersedia.');
-      return;
+    setExportMonth(selectedMonth);
+    setExportYear(selectedYear);
+    setExportRole('all');
+    setExportIncludeIndividual(true);
+    setShowExportModal(true);
+  };
+
+  const handleExecuteBulkExport = async () => {
+    setIsExporting(true);
+    let pieChartImage = null;
+    let barChartImage = null;
+    if (chartsRef.current) {
+      const chartImgs = chartsRef.current.getChartImages();
+      pieChartImage = chartImgs.pieChartImage;
+      barChartImage = chartImgs.barChartImage;
     }
-    const { pieChartImage, barChartImage } = chartsRef.current.getChartImages();
+
     const payload = {
-        month: selectedMonth !== -1 ? selectedMonth + 1 : null,
-        year: selectedYear !== -1 ? selectedYear : null,
+        month: exportMonth !== -1 ? exportMonth + 1 : null,
+        year: exportYear !== -1 ? exportYear : null,
+        role: exportRole,
+        includeIndividualSheets: exportIncludeIndividual,
         pieChartImage,
         barChartImage
     };
+
     try {
         const response = await api.post('/api/export-excel', payload, { responseType: 'blob' });
         const url = window.URL.createObjectURL(new Blob([response.data]));
         const link = document.createElement('a');
         link.href = url;
-        link.setAttribute('download', 'Attendance_Report_Everyone.xlsx');
+        const roleSuffix = exportRole !== 'all' ? `_${exportRole.replace(/\s+/g, '_')}` : '';
+        const monthSuffix = exportMonth !== -1 ? `_${exportMonth + 1}-${exportYear}` : `_${exportYear}`;
+        link.setAttribute('download', `Laporan_Absensi_Bulk${roleSuffix}${monthSuffix}.xlsx`);
         document.body.appendChild(link);
         link.click();
         link.remove();
+        window.URL.revokeObjectURL(url);
+        setShowExportModal(false);
+        toast.success('Laporan Excel bulk berhasil diunduh!');
     } catch (error) {
-        console.error('Error exporting with charts:', error);
-        toast.error('Gagal mengekspor laporan dengan grafik.');
+        console.error('Error exporting bulk excel:', error);
+        toast.error('Gagal mengekspor laporan bulk Excel.');
+    } finally {
+        setIsExporting(false);
+    }
+  };
+
+  const handleOpenCorrReview = (req: CorrectionRequest, action: 'approved' | 'rejected') => {
+    setSelectedCorrToReview(req);
+    setCorrReviewAction(action);
+    setCorrAdminNotes('');
+    setShowCorrReviewModal(true);
+  };
+
+  const handleReviewCorrection = async () => {
+    if (!selectedCorrToReview) return;
+    setIsCorrReviewing(true);
+    try {
+      const response = await api.put(`/api/correction-requests/${selectedCorrToReview._id}/review`, {
+        status: corrReviewAction,
+        adminNotes: corrAdminNotes
+      });
+      toast.success(response.data.message || `Pengajuan koreksi berhasil ${corrReviewAction === 'approved' ? 'disetujui' : 'ditolak'}.`);
+      setShowCorrReviewModal(false);
+      setCorrAdminNotes('');
+      fetchCorrectionRequests();
+      fetchAllAttendance(selectedYear);
+      fetchTodaysRecords();
+    } catch (err: any) {
+      toast.error(err.response?.data?.message || 'Gagal memproses review koreksi.');
+    } finally {
+      setIsCorrReviewing(false);
     }
   };
 
@@ -315,20 +487,21 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
         return;
     }
 
-    if (modalMode === 'edit' && formData.status === 'Hadir' && currentRecord?.status !== 'Hadir') {
+    if (formData.status === 'Hadir' && (modalMode === 'add' || currentRecord?.status !== 'Hadir')) {
       if (!formData.clockInTime || !formData.clockOutTime) {
-        toast.warn('Untuk mengubah status menjadi "Hadir", jam masuk dan jam pulang wajib diisi.');
+        toast.warn('Untuk status "Hadir", jam masuk dan jam pulang wajib diisi.');
         return;
       }
       const payload = {
         staffId: formData.staffId, name: formData.name, date: formData.date,
         clockInTime: formData.clockInTime, clockOutTime: formData.clockOutTime,
-        notes: formData.notes || `Status diubah dari ${currentRecord?.status} menjadi Hadir`,
-        adminId: loggedInUser.id
+        notes: formData.notes || `Status diubah menjadi Hadir`,
+        adminId: loggedInUser._id || loggedInUser.id
       };
       try {
         await api.post('/api/records/manual', payload);
-        fetchAllAttendance();
+        fetchAllAttendance(selectedYear);
+        if (selectedStaffId) fetchSelectedStaffWorkTime(selectedStaffId);
         fetchRawRecords(rawRecordsDate);
         fetchTodaysRecords();
         handleCloseModal();
@@ -340,18 +513,22 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
       return;
     }
 
-    // Pastikan `time` terisi untuk status non-Hadir (Sakit, Izin, Cuti)
+    // Pastikan `time` terisi untuk status non-Hadir (Sakit, Izin, Cuti, Alpha)
     const finalTime = formData.status !== 'Hadir'
-      ? (formData.time || 'N/A')
-      : formData.time;
-    const payload = { ...formData, time: finalTime, fromAdmin: true };
+      ? (formData.time && formData.time !== 'N/A' ? formData.time : '00:00')
+      : (formData.time && formData.time !== 'N/A' ? formData.time : '00:00');
+    const payload = { ...formData, time: finalTime, name: formData.name || staff.find(s => s._id === formData.staffId)?.name || '', fromAdmin: true };
     try {
       if (modalMode === 'edit' && currentRecord) {
-        await api.put(`/api/attendance/${currentRecord._id}`, payload);
+        const attendanceId = /^[0-9a-fA-F]{24}$/.test(currentRecord._id) ? currentRecord._id : 'status';
+        await api.put(`/api/attendance/${attendanceId}`, payload);
       } else {
         await api.post('/api/attendance', payload);
       }
-      fetchAllAttendance();
+      fetchAllAttendance(selectedYear);
+      if (selectedStaffId) fetchSelectedStaffWorkTime(selectedStaffId);
+      fetchRawRecords(rawRecordsDate);
+      fetchTodaysRecords();
       handleCloseModal();
       toast.success(`Status ${formData.status} berhasil disimpan.`);
     } catch (error: any) {
@@ -381,7 +558,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
     try {
       if (workTimeModalMode === 'add') {
         await api.post('/api/records/manual', payload);
-        fetchAllAttendance();
+        fetchAllAttendance(selectedYear);
         fetchRawRecords(rawRecordsDate);
         fetchTodaysRecords();
         toast.success('Absensi manual berhasil disimpan.');
@@ -407,7 +584,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
       await api.put(`/api/records/${recordToCorrect._id}/koreksi`, payload);
       fetchRawRecords(rawRecordsDate);
       fetchTodaysRecords();
-      fetchAllAttendance(); // Re-fetch all attendance to recalculate Alpha status
+      fetchAllAttendance(selectedYear); // Re-fetch all attendance to recalculate Alpha status
       handleCloseCorrectionModal();
       toast.success('Data berhasil dikoreksi!');
     } catch (error) {
@@ -438,7 +615,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
         await api.post('/api/records/add-clock-out', payload);
         fetchRawRecords(rawRecordsDate);
         fetchTodaysRecords();
-        fetchAllAttendance(); // Re-fetch all attendance to recalculate Alpha status
+        fetchAllAttendance(selectedYear); // Re-fetch all attendance to recalculate Alpha status
         handleCloseAddClockOutModal();
         toast.success('Absen pulang berhasil ditambahkan.');
     } catch (error) {
@@ -452,8 +629,15 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
     setModalMode(mode);
     setCurrentRecord(record);
     if (mode === 'edit' && record) {
+      const recStaffId = typeof (record as any).staffId === 'object' && (record as any).staffId !== null
+        ? (record as any).staffId._id
+        : record.staffId;
       setFormData({
-        staffId: record.staffId, name: record.name, status: record.status, date: record.date, time: record.time,
+        staffId: recStaffId || selectedStaffId || '',
+        name: record.name || staff.find(s => s._id === (recStaffId || selectedStaffId))?.name || '',
+        status: record.status,
+        date: record.date,
+        time: record.time || 'N/A',
         clockInTime: '', clockOutTime: '', notes: ''
       });
     } else {
@@ -508,10 +692,56 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
     setIsAddClockOutModalOpen(true);
   };
 
-  const handleShowPhoto = (photo: string, name: string) => {
-    setCurrentPhoto(photo);
+  const releasePhoto = useCallback(() => {
+    photoAbortRef.current?.abort();
+    photoAbortRef.current = null;
+    if (photoBlobRef.current) {
+      URL.revokeObjectURL(photoBlobRef.current);
+      photoBlobRef.current = '';
+    }
+  }, []);
+
+  const closePhotoModal = useCallback(() => {
+    setShowPhotoModal(false);
+    setCurrentPhoto(null);
+    releasePhoto();
+  }, [releasePhoto]);
+
+  useEffect(() => releasePhoto, [releasePhoto]);
+
+  // Attendance photos are served from the API host, which is a different subdomain
+  // in production and answers with `Cross-Origin-Resource-Policy: same-origin`.
+  // A direct <img src> on the API origin is therefore rejected by the browser, so
+  // pull it through the authenticated client and preview the resulting blob URL.
+  const handleShowPhoto = async (photo: string, name: string, recordId: string) => {
+    releasePhoto();
     setCurrentPhotoUser(name);
+    setCurrentPhoto(null);
     setShowPhotoModal(true);
+
+    // Legacy rows still embed base64 in the document — usable as-is.
+    if (!photo.startsWith('/uploads/')) {
+      setCurrentPhoto(photo);
+      return;
+    }
+
+    setIsPhotoLoading(true);
+    const controller = new AbortController();
+    photoAbortRef.current = controller;
+    try {
+      const { url } = await fetchAttachmentBlobUrl(`/api/records/${recordId}/photo`, controller.signal);
+      if (controller.signal.aborted) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+      photoBlobRef.current = url.startsWith('blob:') ? url : '';
+      setCurrentPhoto(url);
+    } catch (error: any) {
+      if (controller.signal.aborted || error?.name === 'CanceledError') return;
+      toast.error('Gagal memuat foto absensi.');
+    } finally {
+      if (!controller.signal.aborted) setIsPhotoLoading(false);
+    }
   };
 
   const handleCloseAddClockOutModal = () => {
@@ -534,16 +764,27 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
       setHistorySortDirection('asc');
     }
   };
-  const openDeleteModal = (id: string) => {
-    setRecordToDelete(id);
+  const openDeleteModal = (record: { _id?: string; staffId: string; date: string }) => {
+    setRecordToDelete(record);
     setShowDeleteModal(true);
   };
-  const closeDeleteModal = () => setShowDeleteModal(false);
+  const closeDeleteModal = () => {
+    setRecordToDelete(null);
+    setShowDeleteModal(false);
+  };
   const handleDelete = async () => {
     if (recordToDelete) {
       try {
-        await api.delete(`/api/attendance/${recordToDelete}`);
-        fetchAllAttendance();
+        const attendanceId = recordToDelete._id && /^[0-9a-fA-F]{24}$/.test(recordToDelete._id)
+          ? recordToDelete._id
+          : 'status';
+        await api.delete(`/api/attendance/${attendanceId}`, {
+          params: { staffId: recordToDelete.staffId, date: recordToDelete.date }
+        });
+        fetchAllAttendance(selectedYear);
+        if (selectedStaffId) fetchSelectedStaffWorkTime(selectedStaffId);
+        fetchRawRecords(rawRecordsDate);
+        fetchTodaysRecords();
         toast.success('Data berhasil dihapus.');
       } catch (error) {
         toast.error('Gagal menghapus data.');
@@ -569,7 +810,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
         await api.delete(`/api/records/${recordToDeleteId}`);
         fetchRawRecords(rawRecordsDate);
         fetchTodaysRecords();
-        fetchAllAttendance(); // Re-fetch all attendance to recalculate Alpha status
+        fetchAllAttendance(selectedYear); // Re-fetch all attendance to recalculate Alpha status
         toast.success('Data record berhasil dihapus.');
       } catch (error) {
         toast.error('Gagal menghapus data record.');
@@ -580,13 +821,14 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
   };
 
   const renderStatusBadge = (status: 'normal' | 'manual_admin' | 'koreksi', notes?: string, edited_by?: EditedBy) => {
-    if (status === 'normal' || !status) return null;
-    const variant = status === 'manual_admin' ? 'info' : 'warning';
-    const text = status === 'manual_admin' ? 'Manual' : 'Koreksi';
+    const normalized = status || 'normal';
+    const variant = normalized === 'manual_admin' ? 'info' : normalized === 'koreksi' ? 'warning' : 'secondary';
+    const text = normalized === 'manual_admin' ? 'Manual' : normalized === 'koreksi' ? 'Koreksi' : 'Otomatis';
     const tooltip = (
-      <Tooltip id={`tooltip-${status}`}>
-        <strong>{text}</strong> by {edited_by?.name || 'N/A'}<br />
-        Notes: {notes || 'No notes'}
+      <Tooltip id={`tooltip-${normalized}`}>
+        <strong>Entry status: {text}</strong>
+        {edited_by?.name ? <><br />Oleh {edited_by.name}</> : null}
+        {notes ? <><br />Notes: {notes}</> : null}
       </Tooltip>
     );
     return (
@@ -670,19 +912,27 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
     let status: 'Hadir' | 'Sakit' | 'Izin' | 'Alpha' | 'Cuti' | '-' = '-';
     let keteranganMasuk = workTimeRecord?.keteranganMasuk || '';
     let keteranganPulang = workTimeRecord?.keteranganPulang || '';
+    let entry_status: 'normal' | 'manual_admin' | 'koreksi' = workTimeRecord?.entry_status || 'normal';
 
-    if (workTimeRecord) {
-        // If there are actual clock-in/out records, the status is 'Hadir' for that day
+    if (attendanceRecord && attendanceRecord.status && attendanceRecord.status !== 'Hadir') {
+        status = attendanceRecord.status;
+        keteranganMasuk = attendanceRecord.status;
+        keteranganPulang = '';
+        if (!workTimeRecord) {
+          entry_status = /^[0-9a-fA-F]{24}$/.test(attendanceRecord._id) ? 'manual_admin' : 'normal';
+        }
+    } else if (workTimeRecord) {
         status = 'Hadir';
         keteranganMasuk = workTimeRecord.keteranganMasuk;
         keteranganPulang = workTimeRecord.keteranganPulang;
     } else if (attendanceRecord) {
-        // If there's an attendance record but no clock-in/out, use the attendance status
         status = attendanceRecord.status;
-        keteranganMasuk = attendanceRecord.status; // For non-Hadir statuses, set keteranganMasuk to the status
-        keteranganPulang = ''; // No clock-out for non-Hadir attendance
+        keteranganMasuk = attendanceRecord.status;
+        keteranganPulang = '';
+        if (attendanceRecord.status !== 'Alpha' && /^[0-9a-fA-F]{24}$/.test(attendanceRecord._id)) {
+          entry_status = 'manual_admin';
+        }
     } else {
-        // No records at all for this date
         status = '-';
         keteranganMasuk = '-';
         keteranganPulang = '-';
@@ -690,11 +940,14 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
 
     return {
       date, status, keteranganMasuk, keteranganPulang,
-      clockInTime: workTimeRecord?.clockInTime || '-',
-      clockOutTime: workTimeRecord?.clockOutTime || '-',
-      totalHours: workTimeRecord?.totalHours || '-',
+      clockInTime: status === 'Hadir' ? (workTimeRecord?.clockInTime || '-') : '-',
+      clockOutTime: status === 'Hadir' ? (workTimeRecord?.clockOutTime || '-') : '-',
+      totalHours: status === 'Hadir' ? (workTimeRecord?.totalHours || '-') : '-',
       name: workTimeRecord?.name || attendanceRecord?.name || '',
-      entry_status: workTimeRecord?.entry_status || 'normal',
+      staffId: selectedStaffId || '',
+      attendanceId: attendanceRecord?._id,
+      time: attendanceRecord?.time || 'N/A',
+      entry_status,
       notes: workTimeRecord?.notes,
       edited_by: workTimeRecord?.edited_by,
     };
@@ -747,9 +1000,21 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
           <h1 className="h3 font-jakarta font-weight-bold text-primary-green mb-1">Admin Dashboard</h1>
           <p className="text-muted small mb-0">Kelola kehadiran, pengaturan hari kerja, dan laporan staf.</p>
         </div>
-        <div className="d-flex gap-2">
-          <Button variant="success" className="rounded-pill px-4 shadow-sm" onClick={handleExport}>
-            <Download size={18} className="me-2" />
+        <div className="d-flex gap-2 flex-wrap">
+          <Button as={Link as any} to="/admin/announcements" variant="outline-primary" className="rounded-pill px-3 shadow-sm d-flex align-items-center">
+            <Megaphone size={16} className="me-2" />
+            Pengumuman
+          </Button>
+          <Button as={Link as any} to="/admin/audit-logs" variant="outline-secondary" className="rounded-pill px-3 shadow-sm d-flex align-items-center">
+            <HistoryIcon size={16} className="me-2" />
+            Audit Trail
+          </Button>
+          <Button as={Link as any} to="/admin/notification-settings" variant="outline-success" className="rounded-pill px-3 shadow-sm d-flex align-items-center">
+            <Bell size={16} className="me-2" />
+            Notifikasi
+          </Button>
+          <Button variant="success" className="rounded-pill px-4 shadow-sm d-flex align-items-center" onClick={handleExport}>
+            <Download size={16} className="me-2" />
             {selectedStaffId ? 'Export Laporan Staff' : 'Export Laporan Global'}
           </Button>
         </div>
@@ -762,21 +1027,13 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
               <Form.Label className="small font-weight-bold text-muted text-uppercase mb-2">Pilih Staff Untuk Detail</Form.Label>
               <Select 
                 id="staff-select" 
+                classNamePrefix="react-select"
                 options={staffOptions} 
                 value={staffOptions.find(option => option.value === selectedStaffId)}
                 onChange={(selectedOption) => setSelectedStaffId(selectedOption ? selectedOption.value : null)}
                 isClearable 
                 isSearchable 
                 placeholder="Cari nama staff..." 
-                styles={{
-                  control: (base) => ({
-                    ...base,
-                    borderRadius: '12px',
-                    border: '1px solid #e2e8f0',
-                    boxShadow: 'none',
-                    '&:hover': { border: '1px solid #cbd5e1' }
-                  })
-                }}
               />
             </Col>
             <Col md={5}>
@@ -784,13 +1041,13 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
               <div className="d-flex gap-2">
                 <Form.Select className="rounded-12 border-light bg-light py-2" value={selectedMonth} onChange={(e) => setselectedMonth(parseInt(e.target.value))}>
                   <option value={-1}>Semua Bulan</option>
-                  {['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'].map((month, index) => (
+                  {MONTHS_ID.map((month, index) => (
                     <option key={index} value={index}>{month}</option>
                   ))}
                 </Form.Select>
                 <Form.Select className="rounded-12 border-light bg-light py-2" value={selectedYear} onChange={(e) => setSelectedYear(parseInt(e.target.value))}>
                   <option value={-1}>Semua Tahun</option>
-                  {Array.from(new Set(allAttendance.map(a => new Date(a.date).getFullYear()))).sort().map(year => (
+                  {availableYears.map(year => (
                     <option key={year} value={year}>{year}</option>
                   ))}
                 </Form.Select>
@@ -799,6 +1056,37 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
           </Row>
         </Card.Body>
       </Card>
+
+      {activeKpi && kpiStaffList[activeKpi as keyof typeof kpiStaffList] && (
+        <Card className="border-0 shadow-sm mb-3 rounded-12 overflow-hidden" style={{ borderLeft: '4px solid var(--accent-green)' }}>
+          <Card.Body className="d-flex align-items-center gap-2 flex-wrap py-3 px-4 bg-emerald-light">
+            <span className="fw-bold text-primary-green me-2">{kpiTitles[activeKpi] || activeKpi}:</span>
+            {kpiStaffList[activeKpi as keyof typeof kpiStaffList].length > 0 ? (
+              kpiStaffList[activeKpi as keyof typeof kpiStaffList].map(s => (
+                <Button
+                  key={s.id}
+                  size="sm"
+                  variant={selectedStaffId === s.id ? 'success' : 'light'}
+                  className={`rounded-pill fw-bold shadow-sm ${selectedStaffId === s.id ? '' : 'border'}`}
+                  onClick={() => setSelectedStaffId(s.id)}
+                >
+                  {s.name}
+                </Button>
+              ))
+            ) : (
+              <span className="text-muted small">Tidak ada staf pada kategori ini.</span>
+            )}
+            <Button
+              size="sm"
+              variant="link"
+              className="ms-auto text-decoration-none fw-bold small px-2"
+              onClick={() => { setSearchParams({}); setSelectedStaffId(null); }}
+            >
+              Reset
+            </Button>
+          </Card.Body>
+        </Card>
+      )}
 
       <Tabs defaultActiveKey="dashboard" id="admin-dashboard-tabs" className="mb-3">
         <Tab eventKey="dashboard" title="Dashboard">
@@ -840,7 +1128,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
                 </Card>
               )}
               <AdminSummary users={users} todaysRecords={todaysRecords} workDaySettings={workDaySettings} allAttendance={allAttendance} staff={staff} ramadanPeriods={ramadanPeriods} />
-              <AdminCharts ref={chartsRef} allAttendance={allAttendance} users={users} />
+              <AdminCharts ref={chartsRef} allAttendance={allAttendance} users={users} todaysRecords={todaysRecords} allRecords={allRecords} workDaySettings={workDaySettings} holidays={holidays} staff={staff} ramadanPeriods={ramadanPeriods} />
             </>
           ) : (
             <Card className="border-0 shadow-sm rounded-16 mb-4 overflow-hidden">
@@ -853,7 +1141,15 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
                     <div className="d-flex align-items-center gap-2 mt-2">
                       <Badge bg="emerald-light" className="text-primary-green px-3 py-2 rounded-pill shadow-sm border-0">
                         <UserPlus size={14} className="me-1" />
-                        Role: {users.find(u => u.staffId === selectedStaffId)?.role || 'Staff'}
+                        Role: {(() => {
+                          const matchedUser = users.find(u => {
+                            const uStaffId = typeof u.staffId === 'object' && u.staffId !== null ? u.staffId._id : u.staffId;
+                            return uStaffId === selectedStaffId;
+                          });
+                          const rawRole = matchedUser?.role;
+                          if (!rawRole) return 'Staff';
+                          return ROLE_LABELS[rawRole as keyof typeof ROLE_LABELS] || rawRole;
+                        })()}
                       </Badge>
                       <Badge bg="light" text="dark" className="px-3 py-2 rounded-pill shadow-sm border">
                         ID: {selectedStaffId.slice(-6).toUpperCase()}
@@ -889,13 +1185,18 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
                   <table className="table table-hover mb-0 align-middle">
                     <thead className="bg-light">
                       <tr>
-                        <th className="border-0 py-3 ps-4" onClick={() => handleHistorySort('date')} style={{ cursor: 'pointer' }}>
+                        <th className="border-0 py-3 ps-4" onClick={() => handleHistorySort('date')} style={{ cursor: 'pointer' }}
+                            aria-sort={historySortColumn === 'date' ? (historySortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}>
                           <div className="d-flex align-items-center gap-2">Tanggal <HistoryIcon size={14} className="text-muted" /></div>
                         </th>
-                        <th className="border-0 py-3" onClick={() => handleHistorySort('status')} style={{ cursor: 'pointer' }}>Status</th>
-                        <th className="border-0 py-3" onClick={() => handleHistorySort('clockInTime')} style={{ cursor: 'pointer' }}>Jam Masuk</th>
-                        <th className="border-0 py-3" onClick={() => handleHistorySort('clockOutTime')} style={{ cursor: 'pointer' }}>Jam Pulang</th>
-                        <th className="border-0 py-3" onClick={() => handleHistorySort('totalHours')} style={{ cursor: 'pointer' }}>Total Jam</th>
+                        <th className="border-0 py-3" onClick={() => handleHistorySort('status')} style={{ cursor: 'pointer' }}
+                            aria-sort={historySortColumn === 'status' ? (historySortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}>Status</th>
+                        <th className="border-0 py-3" onClick={() => handleHistorySort('clockInTime')} style={{ cursor: 'pointer' }}
+                            aria-sort={historySortColumn === 'clockInTime' ? (historySortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}>Jam Masuk</th>
+                        <th className="border-0 py-3" onClick={() => handleHistorySort('clockOutTime')} style={{ cursor: 'pointer' }}
+                            aria-sort={historySortColumn === 'clockOutTime' ? (historySortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}>Jam Pulang</th>
+                        <th className="border-0 py-3" onClick={() => handleHistorySort('totalHours')} style={{ cursor: 'pointer' }}
+                            aria-sort={historySortColumn === 'totalHours' ? (historySortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}>Total Jam</th>
                         <th className="border-0 py-3">Keterangan</th>
                         <th className="border-0 py-3 text-center pe-4">Aksi</th>
                       </tr>
@@ -922,18 +1223,37 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
                             </div>
                           </td>
                           <td className="text-center pe-4">
-                            {attendanceByDate.get(item.date) ? (
-                              <div className="d-flex justify-content-center gap-2">
-                                <Button variant="outline-info" size="sm" className="border-0 rounded-circle p-2" onClick={() => handleOpenModal('edit', attendanceByDate.get(item.date))} title="Edit">
-                                  <Edit2 size={16} />
-                                </Button>
-                                <Button variant="outline-danger" size="sm" className="border-0 rounded-circle p-2" onClick={() => openDeleteModal(attendanceByDate.get(item.date)!._id)} title="Hapus">
-                                  <Trash2 size={16} />
-                                </Button>
-                              </div>
-                            ) : (
-                              <Badge bg="light" text="muted" className="border-0 font-weight-normal small">Otomatis</Badge>
-                            )}
+                            <div className="d-flex justify-content-center gap-2">
+                              <Button
+                                variant="outline-info"
+                                size="sm"
+                                className="border-0 rounded-circle p-2"
+                                title="Edit status kehadiran"
+                                onClick={() => handleOpenModal('edit', {
+                                  _id: item.attendanceId || '',
+                                  staffId: item.staffId || selectedStaffId || '',
+                                  name: item.name,
+                                  status: item.status === '-' ? 'Hadir' : item.status,
+                                  date: item.date,
+                                  time: item.time || 'N/A',
+                                })}
+                              >
+                                <Edit2 size={16} />
+                              </Button>
+                              <Button
+                                variant="outline-danger"
+                                size="sm"
+                                className="border-0 rounded-circle p-2"
+                                title="Hapus kehadiran"
+                                onClick={() => openDeleteModal({
+                                  _id: item.attendanceId,
+                                  staffId: item.staffId || selectedStaffId || '',
+                                  date: item.date,
+                                })}
+                              >
+                                <Trash2 size={16} />
+                              </Button>
+                            </div>
                           </td>
                         </tr>
                       )) : (
@@ -957,6 +1277,159 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
         </Tab>
         <Tab eventKey="ramadan-settings" title="Pengaturan Ramadhan">
           <RamadanSettings />
+        </Tab>
+        <Tab 
+          eventKey="correction-requests" 
+          title={
+            <div className="d-flex align-items-center gap-2">
+              <span>Permintaan Koreksi</span>
+              {correctionRequests.filter(c => c.status === 'pending').length > 0 && (
+                <Badge bg="danger" pill style={{ fontSize: '0.7rem' }}>
+                  {correctionRequests.filter(c => c.status === 'pending').length}
+                </Badge>
+              )}
+            </div>
+          }
+        >
+          <Card className="border-0 shadow-sm rounded-16 overflow-hidden">
+            <Card.Header className="bg-white py-3 border-bottom d-flex justify-content-between align-items-center flex-wrap gap-2">
+              <div>
+                <h5 className="mb-0 fw-bold text-primary-green d-flex align-items-center gap-2">
+                  <Edit2 size={18} /> Daftar Pengajuan Koreksi Absensi Staf
+                </h5>
+                <small className="text-muted">Tinjau dan setujui permintaan koreksi jam masuk/pulang staf</small>
+              </div>
+              <div className="d-flex gap-2 flex-wrap">
+                <Button
+                  variant="outline-success"
+                  size="sm"
+                  className="rounded-pill px-3 d-flex align-items-center gap-1"
+                  onClick={() => handleCorrExport('xlsx')}
+                >
+                  <FileSpreadsheet size={14} /> Export Excel
+                </Button>
+                <Button
+                  variant="outline-secondary"
+                  size="sm"
+                  className="rounded-pill px-3 d-flex align-items-center gap-1"
+                  onClick={() => handleCorrExport('csv')}
+                >
+                  <Download size={14} /> Export CSV
+                </Button>
+                <Button 
+                  variant="outline-secondary" 
+                  size="sm" 
+                  className="rounded-pill px-3 d-flex align-items-center gap-1"
+                  onClick={fetchCorrectionRequests}
+                >
+                  <HistoryIcon size={14} /> Refresh Data
+                </Button>
+              </div>
+            </Card.Header>
+            <Card.Body className="p-0">
+              {correctionRequests.length > 0 ? (
+                <div className="table-responsive">
+                  <table className="table table-hover mb-0 align-middle">
+                    <thead className="bg-light">
+                      <tr>
+                        <th className="py-3 ps-4">Nama Staf</th>
+                        <th className="py-3">Tanggal Absen</th>
+                        <th className="py-3">Tipe</th>
+                        <th className="py-3">Waktu Diajukan</th>
+                        <th className="py-3">Alasan</th>
+                        <th className="py-3 text-center">Status</th>
+                        <th className="py-3">Catatan Admin</th>
+                        <th className="py-3 text-center pe-4">Aksi</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {correctionRequests.map((corr) => {
+                        const staffName = (corr.staffId && typeof corr.staffId === 'object' ? corr.staffId.name : null) || corr.userId?.name || 'Staff';
+                        const role = corr.userId?.role || 'Staff';
+
+                        return (
+                          <tr key={corr._id}>
+                            <td className="ps-4 fw-bold text-dark">
+                              <div>{staffName}</div>
+                              <span className="small text-muted fw-normal text-capitalize">{role}</span>
+                            </td>
+                            <td>{new Date(corr.date).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' })}</td>
+                            <td>
+                              <Badge bg="light" text="dark" className="border fw-normal">
+                                {corr.requestType === 'clock-in' ? 'Masuk' : corr.requestType === 'clock-out' ? 'Pulang' : 'Masuk & Pulang'}
+                              </Badge>
+                            </td>
+                            <td className="small">
+                              {corr.requestedClockIn && <div className="text-primary-green fw-bold">Masuk: {corr.requestedClockIn}</div>}
+                              {corr.requestedClockOut && <div className="text-info fw-bold">Pulang: {corr.requestedClockOut}</div>}
+                            </td>
+                            <td>
+                              <div className="small text-wrap" style={{ maxWidth: '200px' }}>
+                                {corr.reason}
+                              </div>
+                            </td>
+                            <td className="text-center">
+                              {corr.status === 'pending' && (
+                                <Badge bg="warning" text="dark" className="px-3 py-1 rounded-pill">
+                                  Menunggu
+                                </Badge>
+                              )}
+                              {corr.status === 'approved' && (
+                                <Badge bg="success" className="px-3 py-1 rounded-pill">
+                                  Disetujui
+                                </Badge>
+                              )}
+                              {corr.status === 'rejected' && (
+                                <Badge bg="danger" className="px-3 py-1 rounded-pill">
+                                  Ditolak
+                                </Badge>
+                              )}
+                            </td>
+                            <td className="small text-muted">{corr.adminNotes || '-'}</td>
+                            <td className="text-center pe-4">
+                              {corr.status === 'pending' ? (
+                                <div className="d-flex justify-content-center gap-1">
+                                  <Button 
+                                    variant="success" 
+                                    size="sm" 
+                                    className="rounded-pill px-3 py-1 fw-bold shadow-xs"
+                                    onClick={() => handleOpenCorrReview(corr, 'approved')}
+                                  >
+                                    Setujui
+                                  </Button>
+                                  <Button 
+                                    variant="outline-danger" 
+                                    size="sm" 
+                                    className="rounded-pill px-3 py-1 shadow-xs"
+                                    onClick={() => handleOpenCorrReview(corr, 'rejected')}
+                                  >
+                                    Tolak
+                                  </Button>
+                                </div>
+                              ) : (
+                                <span className="small text-muted">Selesai</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="text-center py-5 text-muted">
+                  <Edit2 size={40} className="mb-2 opacity-25" />
+                  <p className="mb-0">Tidak ada pengajuan koreksi absensi.</p>
+                </div>
+              )}
+            </Card.Body>
+          </Card>
+        </Tab>
+        <Tab eventKey="matrix" title="Matriks Kehadiran">
+          <AdminAttendanceMatrix />
+        </Tab>
+        <Tab eventKey="analytics" title="Analisis">
+          <AdminAnalytics />
         </Tab>
       </Tabs>
 
@@ -994,6 +1467,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
                   <th className="py-3">Waktu</th>
                   <th className="py-3">Tipe</th>
                   <th className="py-3">Status</th>
+                  <th className="py-3">Lokasi</th>
                   <th className="py-3">Catatan</th>
                   <th className="py-3 text-center pe-4">Aksi</th>
                 </tr>
@@ -1011,12 +1485,28 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
                       </Badge>
                     </td>
                     <td>{renderStatusBadge(record.entry_status, record.notes, record.edited_by)}</td>
+                    <td>
+                      {record.location && record.location.latitude && record.location.longitude ? (
+                        <a 
+                          href={`https://www.google.com/maps?q=${record.location.latitude},${record.location.longitude}`} 
+                          target="_blank" 
+                          rel="noopener noreferrer"
+                          className="btn btn-sm btn-light py-1 px-2 rounded-pill d-inline-flex align-items-center gap-1 text-primary-green small text-decoration-none border shadow-xs"
+                          title={`Lat: ${record.location.latitude}, Lon: ${record.location.longitude}`}
+                        >
+                          <MapPin size={13} />
+                          <span>{record.location.distance !== undefined ? `${record.location.distance}m` : 'Peta'}</span>
+                        </a>
+                      ) : (
+                        <span className="text-muted small">-</span>
+                      )}
+                    </td>
                     <td className="small text-muted">{record.notes || '-'}</td>
                     <td className="text-center pe-4">
                       <div className="d-flex justify-content-center gap-1">
                         {(record as any).photo && (
                           <OverlayTrigger overlay={<Tooltip>Lihat Foto Absen</Tooltip>}>
-                            <Button variant="outline-primary" size="sm" className="border-0 rounded-circle p-2" onClick={() => handleShowPhoto((record as any).photo, record.staffId.name)}>
+                            <Button variant="outline-primary" size="sm" className="border-0 rounded-circle p-2" onClick={() => handleShowPhoto((record as any).photo, record.staffId.name, record._id)}>
                               <Camera size={16} />
                             </Button>
                           </OverlayTrigger>
@@ -1042,7 +1532,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
                     </td>
                   </tr>
                 )}) : (
-                  <tr><td colSpan={6} className="text-center py-5 text-muted">
+                  <tr><td colSpan={7} className="text-center py-5 text-muted">
                     <Activity size={48} className="mb-3 opacity-25" />
                     <p>Tidak ada aktivitas pada tanggal ini.</p>
                   </td></tr>
@@ -1070,24 +1560,18 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
             <Form.Group className="mb-3">
               <Form.Label>Status</Form.Label>
               <Form.Control as="select" name="status" value={formData.status} onChange={handleFormChange} required>
+                <option value="Hadir">Hadir</option>
                 <option value="Sakit">Sakit</option>
                 <option value="Izin">Izin</option>
                 <option value="Cuti">Cuti</option>
-                <option value="Hadir">Hadir</option>
+                <option value="Alpha">Alpha</option>
               </Form.Control>
             </Form.Group>
-            {formData.status !== 'Hadir' ? (
-              <>
-                <Form.Group className="mb-3">
-                  <Form.Label>Tanggal</Form.Label>
-                  <Form.Control type="date" name="date" value={formData.date} onChange={handleFormChange} required />
-                </Form.Group>
-                {modalMode === 'add' && <Form.Group className="mb-3">
-                  <Form.Label>Waktu</Form.Label>
-                  <Form.Control type="time" name="time" value={formData.time} onChange={handleFormChange} required />
-                </Form.Group>}
-              </>
-            ) : (
+            <Form.Group className="mb-3">
+              <Form.Label>Tanggal</Form.Label>
+              <Form.Control type="date" name="date" value={formData.date} onChange={handleFormChange} required disabled={modalMode === 'edit'} />
+            </Form.Group>
+            {formData.status === 'Hadir' && currentRecord?.status !== 'Hadir' ? (
               <>
                 <hr/>
                 <p className="text-muted">Mengubah status menjadi "Hadir" memerlukan input jam kerja.</p>
@@ -1103,6 +1587,31 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
                   <Form.Label>Catatan</Form.Label>
                   <Form.Control as="textarea" rows={2} name="notes" value={formData.notes} onChange={handleFormChange} placeholder="Cth: Perubahan dari Sakit menjadi Hadir"/>
                 </Form.Group>
+              </>
+            ) : (
+              <>
+                {modalMode === 'add' && formData.status !== 'Hadir' && <Form.Group className="mb-3">
+                  <Form.Label>Waktu</Form.Label>
+                  <Form.Control type="time" name="time" value={formData.time} onChange={handleFormChange} required />
+                </Form.Group>}
+                {modalMode === 'add' && formData.status === 'Hadir' && (
+                  <>
+                    <hr/>
+                    <p className="text-muted">Status Hadir baru memerlukan jam kerja, atau gunakan tombol Input Masuk/Pulang.</p>
+                    <Form.Group className="mb-3">
+                      <Form.Label>Jam Masuk</Form.Label>
+                      <Form.Control type="time" name="clockInTime" value={formData.clockInTime} onChange={handleFormChange} required />
+                    </Form.Group>
+                    <Form.Group className="mb-3">
+                      <Form.Label>Jam Pulang</Form.Label>
+                      <Form.Control type="time" name="clockOutTime" value={formData.clockOutTime} onChange={handleFormChange} required />
+                    </Form.Group>
+                    <Form.Group className="mb-3">
+                      <Form.Label>Catatan</Form.Label>
+                      <Form.Control as="textarea" rows={2} name="notes" value={formData.notes} onChange={handleFormChange} />
+                    </Form.Group>
+                  </>
+                )}
               </>
             )}
             <Button variant="primary" type="submit">{modalMode === 'add' ? 'Tambah' : 'Simpan Perubahan'}</Button>
@@ -1162,21 +1671,175 @@ const AdminDashboard: React.FC<AdminDashboardProps> = () => {
         </Modal.Footer>
       </Modal>
 
-      <Modal show={showPhotoModal} onHide={() => setShowPhotoModal(false)} centered size="lg">
+      <Modal show={showPhotoModal} onHide={closePhotoModal} centered size="lg">
         <Modal.Header closeButton className="bg-light">
           <Modal.Title className="h5 font-jakarta font-weight-bold text-primary-green">
             <Camera size={20} className="me-2" /> Foto Absen: {currentPhotoUser}
           </Modal.Title>
         </Modal.Header>
         <Modal.Body className="p-0 text-center bg-dark">
-          {currentPhoto ? (
+          {isPhotoLoading ? (
+            <div className="py-5 text-white">
+              <Spinner animation="border" size="sm" className="me-2" /> Memuat foto...
+            </div>
+          ) : currentPhoto ? (
             <img src={currentPhoto} alt="Absen" className="img-fluid shadow-lg" style={{ maxHeight: '80vh', width: 'auto' }} />
           ) : (
             <div className="py-5 text-white">Foto tidak tersedia</div>
           )}
         </Modal.Body>
         <Modal.Footer className="bg-light">
-          <Button variant="secondary" className="rounded-pill px-4" onClick={() => setShowPhotoModal(false)}>Tutup</Button>
+          <Button variant="secondary" className="rounded-pill px-4" onClick={closePhotoModal}>Tutup</Button>
+        </Modal.Footer>
+      </Modal>
+
+      {/* Bulk Export Modal */}
+      <Modal show={showExportModal} onHide={() => setShowExportModal(false)} centered>
+        <Modal.Header closeButton className="border-0 pb-0">
+          <Modal.Title className="h5 font-weight-bold text-primary-green d-flex align-items-center gap-2">
+            <Download size={22} /> Export Laporan Excel Bulk
+          </Modal.Title>
+        </Modal.Header>
+        <Modal.Body className="pt-3">
+          <p className="text-muted small mb-4">
+            Ekspor rekapitulasi absensi lengkap seluruh staf dalam format Excel multi-sheet (Grafik, Matriks Kehadiran, Log Aktivitas, dan Tab Per Staf).
+          </p>
+
+          <Form>
+            <Form.Group className="mb-3">
+              <Form.Label className="small fw-bold text-muted text-uppercase">Filter Role Staf</Form.Label>
+              <Form.Select 
+                value={exportRole} 
+                onChange={(e) => setExportRole(e.target.value)}
+                className="py-2 rounded-12"
+              >
+                <option value="all">Semua Role (Semua Staf)</option>
+                {ROLE_OPTIONS.map(({ value, label }) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
+              </Form.Select>
+            </Form.Group>
+
+            <Row className="g-2 mb-3">
+              <Col sm={6}>
+                <Form.Group>
+                  <Form.Label className="small fw-bold text-muted text-uppercase">Bulan</Form.Label>
+                  <Form.Select 
+                    value={exportMonth} 
+                    onChange={(e) => setExportMonth(parseInt(e.target.value))}
+                    className="py-2 rounded-12"
+                  >
+                    <option value={-1}>Sepanjang Tahun</option>
+                    {MONTHS_ID.map((m, idx) => (
+                      <option key={idx} value={idx}>{m}</option>
+                    ))}
+                  </Form.Select>
+                </Form.Group>
+              </Col>
+              <Col sm={6}>
+                <Form.Group>
+                  <Form.Label className="small fw-bold text-muted text-uppercase">Tahun</Form.Label>
+                  <Form.Select 
+                    value={exportYear} 
+                    onChange={(e) => setExportYear(parseInt(e.target.value))}
+                    className="py-2 rounded-12"
+                  >
+                    <option value={-1}>Semua Tahun</option>
+                    {availableYears.map(year => (
+                      <option key={year} value={year}>{year}</option>
+                    ))}
+                  </Form.Select>
+                </Form.Group>
+              </Col>
+            </Row>
+
+            <Form.Group className="mb-4">
+              <Form.Check 
+                type="checkbox"
+                id="export-include-individual-sheets"
+                label="Sertakan sheet/tab individual untuk setiap staf"
+                checked={exportIncludeIndividual}
+                onChange={(e) => setExportIncludeIndividual(e.target.checked)}
+                className="small fw-bold text-muted"
+              />
+            </Form.Group>
+          </Form>
+        </Modal.Body>
+        <Modal.Footer className="border-0 pt-0">
+          <Button variant="light" className="rounded-pill px-4" onClick={() => setShowExportModal(false)} disabled={isExporting}>
+            Batal
+          </Button>
+          <Button variant="success" className="rounded-pill px-4 shadow-sm fw-bold d-flex align-items-center gap-2" onClick={handleExecuteBulkExport} disabled={isExporting}>
+            {isExporting ? (
+              <>
+                <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+                <span>Memproses...</span>
+              </>
+            ) : (
+              <>
+                <Download size={18} />
+                <span>Unduh File Excel</span>
+              </>
+            )}
+          </Button>
+        </Modal.Footer>
+      </Modal>
+
+      {/* Review Correction Modal */}
+      <Modal show={showCorrReviewModal} onHide={() => setShowCorrReviewModal(false)} centered>
+        <Modal.Header closeButton className="border-0 pb-0">
+          <Modal.Title className="h5 fw-bold">
+            {corrReviewAction === 'approved' ? 'Setujui Pengajuan Koreksi' : 'Tolak Pengajuan Koreksi'}
+          </Modal.Title>
+        </Modal.Header>
+        <Modal.Body className="pt-3">
+          {selectedCorrToReview && (
+            <div className="mb-3 p-3 bg-light rounded-12">
+              <div className="fw-bold mb-1">
+                {(selectedCorrToReview.staffId && typeof selectedCorrToReview.staffId === 'object' ? selectedCorrToReview.staffId.name : null) || selectedCorrToReview.userId?.name}
+              </div>
+              <div className="small text-muted mb-1">
+                Tanggal: <strong>{new Date(selectedCorrToReview.date).toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}</strong>
+              </div>
+              <div className="small text-muted mb-1">
+                Waktu Diajukan: {selectedCorrToReview.requestedClockIn ? `Masuk (${selectedCorrToReview.requestedClockIn}) ` : ''} {selectedCorrToReview.requestedClockOut ? `Pulang (${selectedCorrToReview.requestedClockOut})` : ''}
+              </div>
+              <div className="small text-muted">
+                Alasan: <em>"{selectedCorrToReview.reason}"</em>
+              </div>
+            </div>
+          )}
+
+          <Form.Group className="mb-3">
+            <Form.Label className="small fw-bold text-muted text-uppercase">Catatan Admin (Opsional)</Form.Label>
+            <Form.Control
+              as="textarea"
+              rows={3}
+              value={corrAdminNotes}
+              onChange={(e) => setCorrAdminNotes(e.target.value)}
+              placeholder={corrReviewAction === 'approved' ? 'Cth: Disetujui sesuai konfirmasi' : 'Cth: Mohon berikan bukti kehadiran yang valid'}
+              className="py-2"
+            />
+          </Form.Group>
+        </Modal.Body>
+        <Modal.Footer className="border-0 pt-0">
+          <Button variant="light" className="rounded-pill px-4" onClick={() => setShowCorrReviewModal(false)} disabled={isCorrReviewing}>
+            Batal
+          </Button>
+          <Button 
+            variant={corrReviewAction === 'approved' ? 'success' : 'danger'} 
+            className="rounded-pill px-4 shadow-sm fw-bold" 
+            onClick={handleReviewCorrection} 
+            disabled={isCorrReviewing}
+          >
+            {isCorrReviewing ? (
+              <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+            ) : corrReviewAction === 'approved' ? (
+              'Setujui Koreksi'
+            ) : (
+              'Tolak Pengajuan'
+            )}
+          </Button>
         </Modal.Footer>
       </Modal>
     </div>

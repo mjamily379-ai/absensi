@@ -1,4 +1,4 @@
-import React, { useState, Suspense, lazy } from 'react';
+import React, { useState, useEffect, Suspense, lazy } from 'react';
 import { BrowserRouter as Router, Route, Routes } from 'react-router-dom';
 import api from './api';
 import './App.css';
@@ -10,6 +10,10 @@ import 'bootstrap/dist/css/bootstrap.min.css';
 import { ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import type { User } from './types';
+import { readStoredUser } from './types';
+import { subscribeUser } from './subscription';
+import { STAFF_ROLES } from './constants/roles';
+import NotFoundPage from './NotFoundPage';
 
 // Lazy loaded components
 const LoginPage = lazy(() => import('./LoginPage'));
@@ -19,30 +23,67 @@ const LeaveRequestPage = lazy(() => import('./LeaveRequestPage'));
 const AdminLeaveRequests = lazy(() => import('./AdminLeaveRequests'));
 const AdminUserManagement = lazy(() => import('./AdminUserManagement'));
 const AdminAnnouncements = lazy(() => import('./AdminAnnouncements'));
+const AdminAuditLog = lazy(() => import('./AdminAuditLog'));
+const NotificationSettings = lazy(() => import('./NotificationSettings'));
 const PersonalAccountPage = lazy(() => import('./PersonalAccountPage'));
-
-const STAFF_ROLES = ['staff', 'petugas kebersihan', 'guru ra', 'guru mi akhwat', 'guru mi ikhwan', 'guru tahfidz fase a', 'guru tahfidz fase b & c'];
+const WorkDaySettings = lazy(() => import('./WorkDaySettings'));
+const RamadanSettings = lazy(() => import('./RamadanSettings'));
 
 function App() {
-  const [user, setUser] = useState<User | null>(() => {
-    const savedUser = localStorage.getItem('user');
-    if (savedUser) {
-      const parsedUser = JSON.parse(savedUser);
-      return { ...parsedUser, _id: parsedUser.id || parsedUser._id };
+  const [user, setUser] = useState<User | null>(() => readStoredUser());
+
+  const [darkMode, setDarkMode] = useState<boolean>(() => {
+    const savedTheme = localStorage.getItem('theme');
+    if (savedTheme) {
+      return savedTheme === 'dark';
     }
-    return null;
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
   });
 
-  const handleLogin = (loggedInUser: { id: string, username: string, role: string, staffId?: string, name: string }) => {
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light');
+    localStorage.setItem('theme', darkMode ? 'dark' : 'light');
+    window.dispatchEvent(new CustomEvent('themechange'));
+  }, [darkMode]);
+
+  const toggleDarkMode = () => {
+    setDarkMode(prev => !prev);
+  };
+
+  useEffect(() => {
+    if (user && user._id && user.role) {
+      subscribeUser(user.role, user._id).catch(err => {
+        console.warn('Subscription error on app start:', err);
+      });
+    }
+  }, [user]);
+
+  // Re-sync the user in memory when profile details change (e.g. PersonalAccountPage).
+  useEffect(() => {
+    const handleProfileUpdated = () => {
+      const parsedUser = readStoredUser();
+      if (parsedUser) setUser(parsedUser);
+    };
+    window.addEventListener('profileupdated', handleProfileUpdated);
+    return () => window.removeEventListener('profileupdated', handleProfileUpdated);
+  }, []);
+
+  const handleLogin = (loggedInUser: { id: string, username: string, role: string, staffId?: string, name: string, mustChangePassword?: boolean }) => {
     const userToStore: User = { 
       _id: loggedInUser.id,
       username: loggedInUser.username,
       role: loggedInUser.role as User['role'],
       staffId: loggedInUser.staffId, 
-      name: loggedInUser.name
+      name: loggedInUser.name,
+      mustChangePassword: !!loggedInUser.mustChangePassword
     };
     localStorage.setItem('user', JSON.stringify(userToStore));
     setUser(userToStore);
+    if (userToStore._id && userToStore.role) {
+      subscribeUser(userToStore.role, userToStore._id).catch(err => {
+        console.warn('Subscription error on login:', err);
+      });
+    }
   };
 
   const handleLogout = async () => {
@@ -61,7 +102,7 @@ function App() {
       <ToastContainer
         position="top-right"
         autoClose={5000}
-        theme="light"
+        theme={darkMode ? 'dark' : 'light'}
       />
       <AuthRedirect user={user} />
       <Suspense fallback={<div className="d-flex justify-content-center mt-5"><div className="spinner-border" role="status"></div></div>}>
@@ -69,7 +110,7 @@ function App() {
           <Route path="/login" element={<LoginPage onLogin={handleLogin} />} />
 
           {/* Protected routes */}
-          <Route element={<ProtectedRoute user={user}><Layout user={user!} onLogout={handleLogout} /></ProtectedRoute>}>
+          <Route element={<ProtectedRoute user={user}><Layout user={user!} onLogout={handleLogout} darkMode={darkMode} toggleDarkMode={toggleDarkMode} /></ProtectedRoute>}>
             <Route
               path="/"
               element={
@@ -119,6 +160,38 @@ function App() {
               }
             />
             <Route
+              path="/admin/audit-logs"
+              element={
+                <ProtectedRoute user={user} allowedRoles={['admin']}>
+                  <AdminAuditLog />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/admin/notification-settings"
+              element={
+                <ProtectedRoute user={user} allowedRoles={['admin']}>
+                  <NotificationSettings />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/admin/workday-settings"
+              element={
+                <ProtectedRoute user={user} allowedRoles={['admin']}>
+                  <WorkDaySettings />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/admin/ramadan-settings"
+              element={
+                <ProtectedRoute user={user} allowedRoles={['admin']}>
+                  <RamadanSettings />
+                </ProtectedRoute>
+              }
+            />
+            <Route
               path="/pengajuan-cuti"
               element={
                 <ProtectedRoute user={user} allowedRoles={STAFF_ROLES}>
@@ -131,6 +204,9 @@ function App() {
               element={<PersonalAccountPage />}
             />
           </Route>
+
+          {/* Catch-all 404 */}
+          <Route path="*" element={<NotFoundPage />} />
         </Routes>
       </Suspense>
     </Router>

@@ -1,4 +1,5 @@
 // frontend/src/subscription.ts
+import api from './api';
 
 // This function is needed to convert the VAPID public key to a Uint8Array
 function urlBase64ToUint8Array(base64String: string) {
@@ -16,7 +17,7 @@ function urlBase64ToUint8Array(base64String: string) {
   return outputArray;
 }
 
-export async function subscribeUser(role: string, userId: string) {
+export async function subscribeUser(_role: string, _userId: string) {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
     console.warn('Push messaging is not supported');
     return null;
@@ -43,14 +44,9 @@ export async function subscribeUser(role: string, userId: string) {
       console.log('User is already subscribed.');
     }
 
-    console.log('Sending subscription to backend with role:', role, 'and userId:', userId);
-    await fetch(`${process.env.REACT_APP_API_URL}/api/subscribe`, {
-      method: 'POST',
-      body: JSON.stringify({ subscription, role, userId }),
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
+    // Sent through the authenticated axios instance (cookie + CSRF header).
+    // Server derives the userId from the session, never trusts the client.
+    await api.post('/api/subscribe', { subscription });
     console.log('Subscription sent successfully.');
     return subscription;
 
@@ -72,13 +68,7 @@ export async function unsubscribeUser() {
 
     if (subscription) {
       // Notify the backend to remove the subscription
-      await fetch(`${process.env.REACT_APP_API_URL}/api/unsubscribe`, {
-        method: 'POST',
-        body: JSON.stringify({ endpoint: subscription.endpoint }),
-        headers: {
-          'Content-Type': 'application/json'
-        }
-      });
+      await api.post('/api/unsubscribe', { endpoint: subscription.endpoint });
 
       const unsubscribed = await subscription.unsubscribe();
       if (unsubscribed) {

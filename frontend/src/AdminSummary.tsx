@@ -1,7 +1,9 @@
 import React from 'react';
 import { Tooltip, OverlayTrigger, Card } from 'react-bootstrap';
 import { Users, Timer, Clock, UserX, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import type { Staff, User, Record, Attendance, WorkDay, RamadanPeriod } from './types';
+import { DAYS_ID_SUNDAY_FIRST } from './constants/roles';
 import './AdminSummary.css';
 
 interface AdminSummaryProps {
@@ -14,6 +16,18 @@ interface AdminSummaryProps {
 }
 
 export const AdminSummary = ({ users, todaysRecords, workDaySettings, allAttendance, staff, ramadanPeriods }: AdminSummaryProps) => {
+  const navigate = useNavigate();
+
+  const goToKpi = (kpi: string) => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('kpi') === kpi) {
+      params.delete('kpi');
+    } else {
+      params.set('kpi', kpi);
+    }
+    const qs = params.toString();
+    navigate(qs ? `/admin?${qs}` : '/admin', { replace: true });
+  };
 
   const clockedInStaff = new Map<string, Record>();
   if (todaysRecords) {
@@ -45,11 +59,11 @@ export const AdminSummary = ({ users, todaysRecords, workDaySettings, allAttenda
 
   staffClockInTimes.forEach((clockInTime, staffId: string) => {
     const user = users.find(u => {
-      const uId = typeof u.staffId === 'object' && u.staffId !== null ? (u.staffId as any)._id : u.staffId;
+      const uId = typeof u.staffId === 'object' && u.staffId !== null ? u.staffId._id : u.staffId;
       return uId === staffId;
     });
     if (user) {
-      const dayName = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'][today.getDay()];
+      const dayName = DAYS_ID_SUNDAY_FIRST[today.getDay()] || '';
       const userWorkDay = workDaySettings.find(ws => ws.role === user.role && ws.day === dayName);
 
       if (userWorkDay && userWorkDay.isWorkDay) {
@@ -64,27 +78,47 @@ export const AdminSummary = ({ users, todaysRecords, workDaySettings, allAttenda
   });
   const lateStaffCount = lateStaff.length;
 
-  const dayName = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'][today.getDay()];
+  const dayName = DAYS_ID_SUNDAY_FIRST[today.getDay()] || '';
   const todaysClockedInStaffIds = new Set(
-    (todaysRecords as any[])
+    todaysRecords
       .filter(r => r.type === 'clock-in')
-      .map(r => typeof r.staffId === 'object' ? (r.staffId as { _id: string })._id : r.staffId)
+      .map(r => typeof r.staffId === 'object' ? r.staffId._id : r.staffId)
   );
 
-  const todaysOtherAttendanceStaffIds = new Set(
-    allAttendance
-      .filter(a => a.date === dateString && (a.status === 'Sakit' || a.status === 'Izin' || a.status === 'Cuti'))
-      .map(a => a.staffId)
-  );
+  const todaysOtherAttendanceStaffIds = new Set<string>();
+  allAttendance
+    .filter(a => a.date === dateString && (a.status === 'Sakit' || a.status === 'Izin' || a.status === 'Cuti'))
+    .forEach(a => {
+      const attStaffId = typeof a.staffId === 'object' && a.staffId !== null ? a.staffId._id : a.staffId;
+
+      if (!attStaffId) return;
+
+      // Direct match: attendance staffId matches staffMember._id
+      const matchingStaff = staff.find(s => s._id === attStaffId);
+      if (matchingStaff) {
+        todaysOtherAttendanceStaffIds.add(matchingStaff._id);
+        return;
+      }
+
+      // Fallback: attendance staffId matches user.staffId → get the actual staffMember._id
+      const matchingUser = users.find(u => {
+        const uStaffId = typeof u.staffId === 'object' && u.staffId !== null ? u.staffId._id : u.staffId;
+        return uStaffId === attStaffId;
+      });
+      if (matchingUser) {
+        const uStaffId = typeof matchingUser.staffId === 'object' && matchingUser.staffId !== null ? matchingUser.staffId._id : matchingUser.staffId;
+        if (uStaffId) todaysOtherAttendanceStaffIds.add(uStaffId);
+      }
+    });
 
   const staffNotClockedIn = staff
     .filter(staffMember => {
       const user = users.find(u => {
-        const uStaffId = typeof u.staffId === 'object' && u.staffId !== null ? (u.staffId as any)._id : u.staffId;
+        const uStaffId = typeof u.staffId === 'object' && u.staffId !== null ? u.staffId._id : u.staffId;
         return uStaffId === staffMember._id;
       });
       if (!user || user.role === 'admin') return false;
-      const userStaffId = typeof user.staffId === 'object' && user.staffId !== null ? (user.staffId as any)._id : user.staffId;
+      const userStaffId = typeof user.staffId === 'object' && user.staffId !== null ? user.staffId._id : user.staffId;
       if (!userStaffId) return false;
       const userWorkDay = workDaySettings.find(ws => ws.role === user.role && ws.day === dayName);
       if (!userWorkDay || !userWorkDay.isWorkDay) return false;
@@ -111,7 +145,7 @@ export const AdminSummary = ({ users, todaysRecords, workDaySettings, allAttenda
       </Card>
 
       {/* Currently Clocked In Card */}
-      <Card className="summary-card border-0 shadow-sm overflow-hidden h-100">
+      <Card className="summary-card border-0 shadow-sm clickable overflow-hidden h-100" onClick={() => goToKpi('in')}>
         <Card.Body className="d-flex align-items-center p-4 position-relative">
           <div className="icon-box bg-success-light text-success me-3 shadow-sm">
             <Timer size={26} />
@@ -136,7 +170,7 @@ export const AdminSummary = ({ users, todaysRecords, workDaySettings, allAttenda
           </Tooltip>
         }
       >
-        <Card className="summary-card border-0 shadow-sm clickable overflow-hidden h-100">
+        <Card className="summary-card border-0 shadow-sm clickable overflow-hidden h-100" onClick={() => goToKpi('late')}>
           <Card.Body className="d-flex align-items-center p-4 position-relative">
             <div className="icon-box bg-danger-light text-danger me-3 shadow-sm">
               <Clock size={26} />
@@ -159,7 +193,7 @@ export const AdminSummary = ({ users, todaysRecords, workDaySettings, allAttenda
           </Tooltip>
         }
       >
-        <Card className="summary-card border-0 shadow-sm clickable overflow-hidden h-100">
+        <Card className="summary-card border-0 shadow-sm clickable overflow-hidden h-100" onClick={() => goToKpi('notin')}>
           <Card.Body className="d-flex align-items-center p-4 position-relative">
             <div className="icon-box bg-warning-light text-warning me-3 shadow-sm">
               <UserX size={26} />

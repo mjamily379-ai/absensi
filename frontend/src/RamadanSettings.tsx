@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { toast } from 'react-toastify';
-import { Button, Form, Container, Table, Card, Spinner, Row, Col, Modal, Badge } from 'react-bootstrap';
+import { Button, Form, Container, Table, Card, Spinner, Row, Col, Modal } from 'react-bootstrap';
 import api from './api';
 import type { RamadanPeriod } from './types';
-import { Moon, Calendar, Plus, Trash2, Info, Clock } from 'lucide-react';
+import { Moon, Calendar, Plus, Trash2, Clock } from 'lucide-react';
 
 const RamadanSettings: React.FC = () => {
   const [periods, setPeriods] = useState<RamadanPeriod[]>([]);
