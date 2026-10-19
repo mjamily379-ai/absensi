@@ -53,7 +53,7 @@ exports.getWorkDay = async (req, res) => {
             300000
         );
         res.json(workDays);
-    } catch (err) {
+    } catch (_err) {
         res.status(500).json({ message: 'Error fetching work day settings.' });
     }
 };
@@ -95,8 +95,8 @@ exports.updateWorkDay = async (req, res) => {
         });
 
         res.status(200).json({ message: 'Work day settings updated successfully.' });
-    } catch (err) {
-        console.error('Error updating work day settings:', err);
+    } catch (_err) {
+        console.error('Error updating work day settings:', _err);
         res.status(500).json({ message: 'Error updating work day settings.' });
     }
 };
@@ -144,8 +144,8 @@ exports.bulkUpdateWorkDay = async (req, res) => {
         });
 
         res.status(200).json({ message: `Aturan jam kerja diterapkan ke ${roles.length} role.` });
-    } catch (err) {
-        console.error('Error bulk updating work day settings:', err);
+    } catch (_err) {
+        console.error('Error bulk updating work day settings:', _err);
         res.status(500).json({ message: 'Error bulk updating work day settings.' });
     }
 };
@@ -175,7 +175,7 @@ exports.getAllWorkDays = async (req, res) => {
             }
         }
         res.json(complete);
-    } catch (err) {
+    } catch (_err) {
         res.status(500).json({ message: 'Error fetching all work day settings.' });
     }
 };

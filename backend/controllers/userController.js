@@ -26,7 +26,7 @@ exports.getAllUsers = async (req, res) => {
             return res.json(buildPaginatedResponse(items, total, page, limit));
         }
         res.json(await populated());
-    } catch (err) {
+    } catch (_err) {
         res.status(500).json({ message: 'Error fetching users' });
     }
 };
@@ -47,7 +47,7 @@ exports.getAllStaff = async (req, res) => {
             return res.json(buildPaginatedResponse(items, total, page, limit));
         }
         res.json(await findQuery());
-    } catch (err) {
+    } catch (_err) {
         res.status(500).json({ message: 'Error fetching staff' });
     }
 };

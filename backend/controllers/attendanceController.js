@@ -739,11 +739,11 @@ exports.createRecord = async (req, res) => {
             photoUrl = saved.url;
         }
 
-        const cleanupPhotoOnFailure = (err) => {
+        const cleanupPhotoOnFailure = (_e) => {
             if (photoUrl) {
                 try { deleteStoredPhoto(photoUrl); } catch (_) { /* non-fatal */ }
             }
-            throw err;
+            throw _e;
         };
 
         if (type === 'clock-in') {
@@ -758,7 +758,7 @@ exports.createRecord = async (req, res) => {
             });
             try {
                 await newRecord.save();
-            } catch (err) { cleanupPhotoOnFailure(err); }
+            } catch (_e) { cleanupPhotoOnFailure(_e); }
 
             // Update Attendance summary
             await Attendance.findOneAndUpdate(
@@ -812,13 +812,13 @@ exports.createRecord = async (req, res) => {
             });
             try {
                 await newRecord.save();
-            } catch (err) { cleanupPhotoOnFailure(err); }
+            } catch (_e) { cleanupPhotoOnFailure(_e); }
 
             return res.status(201).json({ message: 'Absen pulang berhasil.', record: newRecord });
         }
 
-    } catch (err) {
-        console.error('Clock-in/out Error:', err);
+    } catch (_err) {
+        console.error('Clock-in/out Error:', _err);
         res.status(500).json({ message: 'Error during clock-in/out' });
     }
 };
@@ -852,9 +852,9 @@ exports.submitAttendance = async (req, res) => {
             { new: true, upsert: true, runValidators: true }
         );
         res.status(201).json(attendanceRecord);
-    } catch (err) {
-        console.error('Error submitting attendance:', err);
-        if (err.code === 11000) {
+    } catch (_err) {
+        console.error('Error submitting attendance:', _err);
+        if (_err.code === 11000) {
             return res.status(409).json({ message: 'Attendance for this date already exists.' });
         }
         res.status(500).json({ message: 'Error submitting attendance' });
@@ -905,8 +905,8 @@ exports.updateAttendance = async (req, res) => {
         });
 
         res.json(updatedAttendance);
-    } catch (err) {
-        console.error('Error updating attendance record:', err);
+    } catch (_err) {
+        console.error('Error updating attendance record:', _err);
         res.status(500).json({ message: 'Error updating attendance record' });
     }
 };
@@ -944,8 +944,8 @@ exports.deleteAttendance = async (req, res) => {
         });
 
         res.json({ message: 'Attendance record deleted successfully' });
-    } catch (err) {
-        console.error('Error deleting attendance record:', err);
+    } catch (_err) {
+        console.error('Error deleting attendance record:', _err);
         res.status(500).json({ message: 'Error deleting attendance record' });
     }
 };

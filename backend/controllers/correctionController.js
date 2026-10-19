@@ -2,7 +2,7 @@ const CorrectionRequest = require('../models/correctionRequestModel');
 const Record = require('../models/recordModel');
 const Attendance = require('../models/attendanceModel');
 const User = require('../models/userModel');
-const Staff = require('../models/staffModel');
+require('../models/staffModel');
 const { sendNotificationToRole, sendNotificationToUser, isNotificationEnabled } = require('../services/notificationService');
 const { logAction } = require('../services/auditService');
 const { getPagination, buildPaginatedResponse, isPaginatedRequest } = require('../utils/pagination');

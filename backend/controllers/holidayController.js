@@ -26,7 +26,7 @@ exports.getHolidays = async (req, res) => {
             ));
         }
         res.json(holidays);
-    } catch (err) {
+    } catch (_err) {
         res.status(500).json({ message: 'Error fetching holidays.' });
     }
 };
@@ -57,8 +57,8 @@ exports.createHoliday = async (req, res) => {
         });
 
         res.status(201).json(newHoliday);
-    } catch (err) {
-        if (err.code === 11000) {
+    } catch (_err) {
+        if (_err.code === 11000) {
             return res.status(409).json({ message: 'Holiday on this date for this role already exists.' });
         }
         res.status(500).json({ message: 'Error creating holiday.' });
@@ -85,7 +85,7 @@ exports.deleteHoliday = async (req, res) => {
         });
 
         res.json({ message: 'Holiday deleted successfully.' });
-    } catch (err) {
+    } catch (_err) {
         res.status(500).json({ message: 'Error deleting holiday.' });
     }
 };

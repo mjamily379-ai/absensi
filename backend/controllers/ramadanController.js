@@ -10,7 +10,7 @@ exports.getRamadanPeriods = async (req, res) => {
             300000
         );
         res.json(periods);
-    } catch (err) {
+    } catch (_err) {
         res.status(500).json({ message: 'Error fetching Ramadan periods.' });
     }
 };
@@ -40,7 +40,7 @@ exports.updateRamadanPeriod = async (req, res) => {
         });
 
         res.json({ message: 'Ramadan period updated successfully.', period });
-    } catch (err) {
+    } catch (_err) {
         res.status(500).json({ message: 'Error updating Ramadan period.' });
     }
 };
@@ -65,7 +65,7 @@ exports.deleteRamadanPeriod = async (req, res) => {
         });
 
         res.json({ message: 'Ramadan period deleted successfully.' });
-    } catch (err) {
+    } catch (_err) {
         res.status(500).json({ message: 'Error deleting Ramadan period.' });
     }
 };

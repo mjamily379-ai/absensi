@@ -88,7 +88,7 @@ const initScheduledJobs = () => {
     cron.schedule('0,15,30,45 12-17 * * *', async () => {
         if (!(await isNotificationEnabled('enableEveningReminder'))) return;
         const settings = await getNotificationSettings();
-        const minutesBefore = resolveMinutesBefore(settings, 'eveningReminderMinutesBefore', 15);
+        const _minutesBefore = resolveMinutesBefore(settings, 'eveningReminderMinutesBefore', 15);
         const message = (settings && settings.eveningReminderMessage) || 'Jangan lupa untuk absen pulang hari ini, {name}!';
         const today = new Date();
         const dateString = today.toLocaleDateString('en-CA');

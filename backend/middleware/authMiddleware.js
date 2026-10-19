@@ -35,7 +35,7 @@ const resolveUserFromRequest = async (req) => {
             username: user.username,
             staffId: user.staffId ? user.staffId.toString() : undefined,
         };
-    } catch (error) {
+    } catch (_error) {
         return null;
     }
 };
