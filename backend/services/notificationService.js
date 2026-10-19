@@ -93,8 +93,8 @@ const addSubscription = async (subData) => {
 const getSubscriptions = async () => {
     try {
         return await Subscription.find();
-    } catch (error) {
-        console.error('Error fetching subscriptions:', error);
+    } catch (_error) {
+        console.error('Error fetching subscriptions:', _error);
         return [];
     }
 };
@@ -102,8 +102,8 @@ const getSubscriptions = async () => {
 const removeSubscription = async (endpoint) => {
     try {
         await Subscription.deleteOne({ 'subscription.endpoint': endpoint });
-    } catch (error) {
-        console.error('Error removing subscription:', error);
+    } catch (_error) {
+        console.error('Error removing subscription:', _error);
     }
 };
 
@@ -131,8 +131,8 @@ const sendNotificationToRole = async (role, payload) => {
             }
         }
         return sent;
-    } catch (error) {
-        console.error(`Error sending notification to role '${role}':`, error);
+    } catch (_error) {
+        console.error(`Error sending notification to role '${role}':`, _error);
         return 0;
     }
 };
@@ -146,8 +146,8 @@ const sendNotificationToUser = async (userId, payload) => {
             return 1;
         }
         return 0;
-    } catch (error) {
-        console.error(`Error sending notification to user '${userId}':`, error);
+    } catch (_error) {
+        console.error(`Error sending notification to user '${userId}':`, _error);
         return 0;
     }
 };

@@ -1,7 +1,7 @@
-const User = require('../models/userModel');
-const Staff = require('../models/staffModel');
-const WorkDay = require('../models/workDayModel');
-const Holiday = require('../models/holidayModel');
+require('../models/userModel');
+require('../models/staffModel');
+require('../models/workDayModel');
+require('../models/holidayModel');
 
 // This function is adapted from the original index.js
 const processWorkTimeRecords = (staffId, records, staff, user, holidaySet, workDaySettings, ramadanPeriods = []) => {

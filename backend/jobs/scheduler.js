@@ -157,8 +157,8 @@ const initScheduledJobs = () => {
                     }
                 }
             }
-        } catch (error) {
-            console.error('Error in Evening Reminders:', error);
+        } catch (_error) {
+            console.error('Error in Evening Reminders:', _error);
         }
     }, { scheduled: true, timezone: "Asia/Jakarta" });
 
@@ -205,8 +205,8 @@ const initScheduledJobs = () => {
                     }
                 }
             }
-        } catch (error) {
-            console.error('Error in Late Warning:', error);
+        } catch (_error) {
+            console.error('Error in Late Warning:', _error);
         }
     }, { scheduled: true, timezone: "Asia/Jakarta" });
 
@@ -250,8 +250,8 @@ const initScheduledJobs = () => {
                     }).save();
                 }
             }
-        } catch (error) {
-            console.error('Error in Mark Absent:', error);
+        } catch (_error) {
+            console.error('Error in Mark Absent:', _error);
         }
     }, { scheduled: true, timezone: "Asia/Jakarta" });
 // 5. Keep approved leave requests in sync with Attendance (heavy work, off the request path)
@@ -259,8 +259,8 @@ const initScheduledJobs = () => {
         try {
             const { synced } = await syncAllApprovedLeaveRequests();
             if (synced > 0) console.log(`Leave sync: ${synced} approved request(s) verified.`);
-        } catch (err) {
-            console.error('Error in leave sync job:', err);
+        } catch (_err) {
+            console.error('Error in leave sync job:', _err);
         }
     }, { scheduled: true, timezone: "Asia/Jakarta" });
 };

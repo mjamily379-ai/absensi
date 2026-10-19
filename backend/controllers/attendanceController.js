@@ -144,7 +144,7 @@ exports.getTodayAttendance = async (req, res) => {
 
         const attendance = await Attendance.find({ date: dateString });
         res.json(attendance);
-    } catch (err) {
+    } catch (_err) {
         res.status(500).json({ message: "Error fetching today's attendance" });
     }
 };
@@ -169,7 +169,7 @@ exports.getTodayRecords = async (req, res) => {
             return res.json(buildPaginatedResponse(items, total, page, limit));
         }
         res.json(await recordsQuery.sort({ timestamp: -1 }));
-    } catch (err) {
+    } catch (_err) {
         res.status(500).json({ message: "Error fetching today's records" });
     }
 };
@@ -198,7 +198,7 @@ exports.getRecordsByDate = async (req, res) => {
             return res.json(buildPaginatedResponse(items, total, page, limit));
         }
         res.json(await recordsQuery.sort({ timestamp: -1 }));
-    } catch (err) {
+    } catch (_err) {
         res.status(500).json({ message: "Error fetching records for the selected date" });
     }
 };
@@ -217,7 +217,7 @@ exports.getAllRecords = async (req, res) => {
             return res.json(buildPaginatedResponse(items, total, page, limit));
         }
         res.json(await populated());
-    } catch (err) {
+    } catch (_err) {
         res.status(500).json({ message: 'Error fetching all records' });
     }
 };
@@ -285,8 +285,8 @@ exports.addManualAttendance = async (req, res) => {
         });
 
         res.status(201).json({ message: 'Manual attendance created successfully.' });
-    } catch (err) {
-        console.error('Manual record creation error:', err);
+    } catch (_err) {
+        console.error('Manual record creation error:', _err);
         res.status(500).json({ message: 'Error creating manual attendance record.' });
     }
 };

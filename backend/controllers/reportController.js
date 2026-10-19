@@ -473,7 +473,7 @@ exports.exportExcel = async (req, res) => {
             }
         }
 
-        for (const [key, aggregate] of monthlyAggregates.entries()) {
+        for (const [_key, aggregate] of monthlyAggregates.entries()) {
             const totalMonthlyHoursFormatted = `${Math.floor(aggregate.totalWorkHoursInMinutes / 60)} jam ${Math.round(aggregate.totalWorkHoursInMinutes % 60)} menit`;
             const avgDailyHoursFormatted = aggregate.workDaysCount > 0
                 ? `${Math.floor((aggregate.totalWorkHoursInMinutes / aggregate.workDaysCount) / 60)} jam ${Math.round((aggregate.totalWorkHoursInMinutes / aggregate.workDaysCount) % 60)} menit`
@@ -489,7 +489,7 @@ exports.exportExcel = async (req, res) => {
         // 5. Individual Tab per Staff (Optional / Default true for Bulk)
         if (includeIndividualSheets) {
             staff.forEach((s, idx) => {
-                const user = users.find(u => u.staffId && (u.staffId._id ? u.staffId._id.toString() : u.staffId.toString()) === s._id.toString());
+                const _user = users.find(u => u.staffId && (u.staffId._id ? u.staffId._id.toString() : u.staffId.toString()) === s._id.toString());
                 const staffProcRecords = allProcessedRecords.filter(pr => pr.staffId.toString() === s._id.toString());
                 
                 let cleanSheetName = `${idx + 1}. ${s.name}`.replace(/[\\/?*:[\]]/g, '').trim().substring(0, 30);
@@ -533,8 +533,8 @@ exports.exportExcel = async (req, res) => {
         res.setHeader('Content-Disposition', `attachment; filename="${finalFileName}"`);
         await workbook.xlsx.write(res);
         res.end();
-    } catch (err) {
-        console.error('Error exporting Excel:', err);
+    } catch (_err) {
+        console.error('Error exporting Excel:', _err);
         res.status(500).send('Error exporting data to Excel');
     }
 };
@@ -789,7 +789,7 @@ exports.exportPersonalExcel = async (req, res) => {
     }
 
     const monthlyRecapData = [];
-    for (const [key, aggregate] of monthlyAggregates.entries()) {
+    for (const [_key, aggregate] of monthlyAggregates.entries()) {
         const totalMonthlyHoursFormatted = `${Math.floor(aggregate.totalWorkHoursInMinutes / 60)} jam ${Math.round(aggregate.totalWorkHoursInMinutes % 60)} menit`;
         const avgDailyHoursFormatted = aggregate.workDaysCount > 0 ? `${Math.floor((aggregate.totalWorkHoursInMinutes / aggregate.workDaysCount) / 60)} jam ${Math.round((aggregate.totalWorkHoursInMinutes / aggregate.workDaysCount) % 60)} menit` : 'N/A';
         monthlyRecapData.push({ ...aggregate, totalMonthlyHours: totalMonthlyHoursFormatted, avgDailyHours: avgDailyHoursFormatted });
@@ -801,8 +801,8 @@ exports.exportPersonalExcel = async (req, res) => {
     await workbook.xlsx.write(res);
     res.end();
 
-  } catch (err) {
-    console.error('Error exporting personal Excel:', err);
+  } catch (_err) {
+    console.error('Error exporting personal Excel:', _err);
     res.status(500).send('Error exporting data to Excel');
   }
 };

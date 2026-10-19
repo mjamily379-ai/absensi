@@ -191,7 +191,7 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 // Global error handler (CORS rejections, CSRF failures, oversized payloads, 404s, etc.)
-// eslint-disable-next-line no-unused-vars
+ 
 app.use((err, req, res, next) => {
     console.error('Unhandled error:', err.message || err);
     if (res.headersSent) return next(err);

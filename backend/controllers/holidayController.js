@@ -141,18 +141,18 @@ exports.syncHolidays = async (req, res) => {
             message: 'Sinkronisasi berhasil.',
             synced: result.upsertedCount + result.modifiedCount + result.matchedCount,
         });
-    } catch (err) {
+    } catch (_err) {
         console.error('=== DEBUG SYNC HOLIDAY ===');
-        console.error('Message:', err.message);
-        if (err.code) console.error('Code:', err.code);
-        if (err.response) console.error('Status:', err.response.status);
+        console.error('Message:', _err.message);
+        if (_err.code) console.error('Code:', _err.code);
+        if (_err.response) console.error('Status:', _err.response.status);
         console.error('===========================');
 
-        const status = err.response?.status || 500;
+        const status = _err.response?.status || 500;
         let message = 'Gagal menghubungi server libur nasional.';
         
-        if (err.code === 'ENOTFOUND') message = 'Koneksi internet server bermasalah (DNS Fail).';
-        if (err.code === 'ECONNABORTED') message = 'Koneksi ke server libur nasional timeout.';
+        if (_err.code === 'ENOTFOUND') message = 'Koneksi internet server bermasalah (DNS Fail).';
+        if (_err.code === 'ECONNABORTED') message = 'Koneksi ke server libur nasional timeout.';
         if (status === 404) message = `Data libur nasional tahun ${year} belum tersedia.`;
         
         res.status(status).json({ message });

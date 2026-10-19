@@ -10,7 +10,7 @@ const PHOTO_SUBDIR = path.join(UPLOAD_DIR, 'photos');
 const MAX_PHOTO_BYTES = 5 * 1024 * 1024; // 5 MB encoded source cap
 const MAX_WIDTH = 960; // downscale before storing
 
-const EXT_BY_MIME = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp' };
+const _EXT_BY_MIME = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp' };
 
 if (!fs.existsSync(PHOTO_SUBDIR)) {
     fs.mkdirSync(PHOTO_SUBDIR, { recursive: true });

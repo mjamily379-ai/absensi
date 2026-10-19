@@ -61,7 +61,7 @@ const removeAttachmentFile = (storedName) => {
         if (path.resolve(filePath).startsWith(path.resolve(UPLOAD_DIR)) && fs.existsSync(filePath)) {
             fs.unlinkSync(filePath);
         }
-    } catch (_) { /* non-fatal */ }
+    } catch (_e) { /* non-fatal */ }
 };
 
 module.exports = {

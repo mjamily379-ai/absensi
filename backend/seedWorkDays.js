@@ -33,7 +33,7 @@ const defaultWorkDays = [
   ...week('07:00', '15:00', true).map(d => ({ role: 'staff', ...d, ...(d.isWorkDay && d.day === 'Sabtu' ? { startTime: '07:30', endTime: '12:00', ramadanStartTime: '07:30', ramadanEndTime: '12:00' } : {}) })),
   ...week('06:00', '16:00', true).map(d => ({ role: 'petugas kebersihan', ...d, ...(d.isWorkDay && d.day === 'Sabtu' ? { startTime: '06:00', endTime: '12:00', ramadanStartTime: '06:00', ramadanEndTime: '12:00' } : {}) })),
   // Admin never has work days (dashboard-only role)
-  ...DAYS.map((day, i) => ({ role: 'admin', day, isWorkDay: false, startTime: '00:00', endTime: '00:00', ramadanStartTime: '00:00', ramadanEndTime: '00:00' })),
+  ...DAYS.map((day, _i) => ({ role: 'admin', day, isWorkDay: false, startTime: '00:00', endTime: '00:00', ramadanStartTime: '00:00', ramadanEndTime: '00:00' })),
   ...week('07:50', '09:30').map(d => ({ role: 'guru tahfidz fase a', ...d })),
   ...week('07:20', '08:55').map(d => ({ role: 'guru tahfidz fase b & c', ...d, ...(d.day === 'Rabu' ? { isWorkDay: false, startTime: '00:00', endTime: '00:00', ramadanStartTime: '00:00', ramadanEndTime: '00:00' } : {}) })),
   ...week('07:00', '15:00').map(d => ({ role: 'guru asisten', ...d })),

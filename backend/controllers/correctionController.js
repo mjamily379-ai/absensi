@@ -121,8 +121,8 @@ exports.createCorrectionRequest = async (req, res) => {
                     body: `${user.name} mengajukan koreksi absensi untuk tanggal ${date}.`,
                     data: { url: '/admin' }
                 });
-            } catch (notifErr) {
-                console.warn('Failed to send admin push notification for correction request:', notifErr);
+            } catch (_notifErr) {
+                console.warn('Failed to send admin push notification for correction request:', _notifErr);
             }
         }
 

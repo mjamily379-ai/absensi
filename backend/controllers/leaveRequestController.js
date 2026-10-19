@@ -47,8 +47,8 @@ const notifyAdminsNewLeave = async ({ applicantName, leaveType, startDate }) => 
             sendPushNotification(adminSub.subscription, notificationPayload);
         }
         return adminSubscriptions.length;
-    } catch (notifErr) {
-        console.error('Error sending push notification to admins:', notifErr);
+    } catch (_notifErr) {
+        console.error('Error sending push notification to admins:', _notifErr);
         return 0;
     }
 };
@@ -76,9 +76,9 @@ const approveLeave = async (leaveId, req) => {
     let syncError = null;
     try {
         await syncApprovedLeaveById(leaveId);
-    } catch (e) {
-        console.error('Error syncing approved leave with attendance:', e);
-        syncError = e;
+    } catch (_e) {
+        console.error('Error syncing approved leave with attendance:', _e);
+        syncError = _e;
     }
 
     const formattedStartDate = new Date(leave.startDate).toLocaleDateString('id-ID');
@@ -281,7 +281,7 @@ exports.bulkUpdateLeaveRequests = async (req, res) => {
                 } else {
                     updated += 1;
                 }
-            } catch (err) {
+            } catch (_) {
                 failed += 1;
             }
         }
